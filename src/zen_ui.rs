@@ -342,14 +342,94 @@ pub fn zen_button(ui: &mut Ui, text: &str, kind: BtnKind, size: Vec2) -> Respons
             1.0_f32,
         ),
     };
-    ui.add_sized(
+    let prev_pad = ui.spacing().button_padding;
+    ui.spacing_mut().button_padding = Vec2::new(5.0, 2.0);
+    let resp = ui.add_sized(
         size,
         egui::Button::new(RichText::new(text).size(11.5).color(fg))
             .fill(fill)
             .stroke(Stroke::new(stroke_w, stroke_col))
             .corner_radius(CornerRadius::ZERO)
             .truncate(),
-    )
+    );
+    ui.spacing_mut().button_padding = prev_pad;
+    resp
+}
+
+/// Ligne d'en-tête responsive à 2 colonnes (gauche étirable + droite largeur fixe)
+/// garantissant mathématiquement zéro collision entre le texte de gauche et les boutons de droite.
+pub fn split_header_row(
+    ui: &mut Ui,
+    height: f32,
+    right_width: f32,
+    left_fn: impl FnOnce(&mut Ui),
+    right_fn: impl FnOnce(&mut Ui),
+) {
+    let avail_w = ui.available_width().max(120.0);
+    let (row_rect, _) = ui.allocate_exact_size(Vec2::new(avail_w, height), egui::Sense::hover());
+    let right_w = right_width.min(avail_w * 0.65);
+    let left_w = (avail_w - right_w - 8.0).max(40.0);
+
+    let left_rect = Rect::from_min_size(row_rect.min, Vec2::new(left_w, height));
+    let right_rect = Rect::from_min_size(
+        Pos2::new(row_rect.max.x - right_w, row_rect.min.y),
+        Vec2::new(right_w, height),
+    );
+
+    let mut left_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(left_rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    left_ui.set_clip_rect(left_rect);
+    left_fn(&mut left_ui);
+
+    let mut right_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(right_rect)
+            .layout(egui::Layout::right_to_left(egui::Align::Center)),
+    );
+    right_ui.set_clip_rect(right_rect);
+    right_fn(&mut right_ui);
+}
+
+/// Carte Pixel-Art à hauteur dynamique (s'adapte toujours au contenu sans jamais couper le texte en bas).
+pub fn zen_card<R>(
+    ui: &mut Ui,
+    fill: Color32,
+    border: Color32,
+    top_accent: Option<Color32>,
+    pad_x: i8,
+    pad_y: i8,
+    add_contents: impl FnOnce(&mut Ui) -> R,
+) -> egui::InnerResponse<R> {
+    let avail_w = ui.available_width().max(120.0);
+    let inner = egui::Frame::NONE
+        .fill(fill)
+        .stroke(Stroke::new(2.0_f32, border))
+        .inner_margin(egui::Margin {
+            left: pad_x,
+            right: pad_x,
+            top: pad_y + if top_accent.is_some() { 4 } else { 0 },
+            bottom: pad_y,
+        })
+        .show(ui, |ui| {
+            ui.set_width((avail_w - (pad_x as f32) * 2.0 - 4.0).max(80.0));
+            add_contents(ui)
+        });
+
+    let rect = inner.response.rect;
+    if let Some(accent) = top_accent {
+        fill_px(
+            ui.painter(),
+            rect.min.x + 2.0,
+            rect.min.y + 2.0,
+            (rect.width() - 4.0).max(0.0),
+            4.0,
+            accent,
+        );
+    }
+    inner
 }
 
 /// Carte de réponse d'Éveil responsive à largeur fixe avec retour à la ligne automatique (ne dépasse jamais).
