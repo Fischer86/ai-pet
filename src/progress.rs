@@ -20,8 +20,6 @@ pub enum XpPath {
 }
 
 impl XpPath {
-    pub const ALL: [XpPath; 3] = [XpPath::Zazen, XpPath::Eveil, XpPath::Bushido];
-
     pub fn label(&self) -> &'static str {
         match self {
             Self::Zazen => "Zazen",
@@ -351,15 +349,11 @@ pub struct Progress {
     /// Journal des derniers gains d'XP (persisté pour garder la trace de sa progression).
     pub recent_xp_log: Vec<XpLogEntry>,
 
-    /// Indique si le Sensei prend des initiatives autonomes périodiques (activé par défaut).
-    #[serde(default = "default_true")]
+    /// Indique si le Sensei prend des initiatives autonomes périodiques (opt-in, désactivé par défaut pour ne jamais brusquer le disciple).
+    #[serde(default)]
     pub sensei_autonomy: bool,
 
     pub permissions: PermissionsConfig,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 pub fn progress_file_path() -> PathBuf {
