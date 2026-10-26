@@ -1,33 +1,39 @@
-# 🎋 Kaze (風) — Compagnon AI Pet Samouraï Zen en Rust
+# 🎋 Kaze (風) — Compagnon AI Pet Samouraï Zen & Centre de Contrôle en Rust
 
 ![Samurai Sprite](assets/Samurai/5x/idle_0.png) ![Samurai Run](assets/Samurai/5x/run_1.png) ![Samurai Jump](assets/Samurai/5x/jump_2.png) ![Samurai Attack](assets/Samurai/5x/attack_3.png) ![Samurai Meditate](assets/Samurai/5x/swim_1.png)
 
-**Kaze (風)** est un compagnon de bureau (**AI Pet**) écrit en **Rust** (`eframe`/`egui`, `sysinfo`, `arboard`, `x11rb`) doté d'une interface **Pixel-Art Zen** sur-mesure, d'un **processus d'agent sécurisé avec confirmation humaine (Human-in-the-Loop)**, d'une **conscience temps réel approfondie** et d'une compatibilité native **Linux (KDE Plasma Wayland/X11), macOS et Windows**.
+**Kaze (風)** est un compagnon de bureau (**AI Pet**) écrit en **Rust** (`eframe`/`egui`, `sysinfo`, `arboard`, `x11rb`) doté d'une interface **Pixel-Art Zen** épurée, d'une **bulle de dialogue unique tout-en-un**, d'un **Centre de Contrôle (/menu)** sous forme de vraie fenêtre dédiée, d'un **système de progression RPG/Zen (XP, Niveaux, Rangs Samouraï)**, d'un **Dojo d'apprentissage interactif piloté par l'IA**, d'un **mode de méditation guidée Zazen**, et d'un **gestionnaire d'autorisations (Human-in-the-Loop)** sécurisé compatible **Linux (KDE Plasma Wayland/X11), macOS et Windows**.
 
 ---
 
-## ✨ Fonctionnalités Principales
+## ✨ Fonctionnalités Clés
 
-- 🏮 **Interface Pixel-Art Zen & Police Dédiée** :
-  - Bulle de dialogue Pixel-Art dessinée au pixel près (coins en escalier, double bordure dynamique selon l'humeur, ornements d'angle, flèche de bulle).
-  - Police Pixel-Art `PixelifySans.ttf` et sprites 100 % embarqués dans l'exécutable (`include_bytes!`).
-  - Particules flottantes (pétales de sakura, feuilles de bambou, lucioles dorées) et effet machine à écrire RPG.
-- 🛡️ **Processus d'Agent avec Confirmation Systématique (Human-in-the-Loop)** :
-  - Pour toute action (même la commande la plus mondaine), le modèle structure sa réflexion :
-    1. **🎯 Que veut l'utilisateur ?** (`user_intent`)
-    2. **🛠️ Que vais-je faire ?** (`planned_action` + `task`)
-    3. **🍃 Et si l'utilisateur refuse ?** (`fallback_if_refused` — Plan B sans exécution)
-  - Affiche deux boutons interactifs : **`✅ Accepter & Exécuter (Entrée)`** et **`❌ Refuser & Continuer (Échap)`**.
-  - Si vous refusez, l'action est annulée et Kaze poursuit la conversation sereinement en suivant son Plan B.
-- 📌 **Toujours au Premier Plan & Présent dans la Barre des Tâches** :
-  - Maintien actif au-dessus de toutes les fenêtres via le protocole EWMH (`x11rb` `_NET_WM_STATE_ABOVE`, `_NET_WM_STATE_STICKY`) et règles compositeur KWin (`~/.config/kwinrulesrc`) sur KDE Plasma, ainsi que `WindowLevel::AlwaysOnTop` sur macOS et Windows.
-  - Entrée d'application avec icône Samouraï dans la barre des tâches.
-- 🧘 **Mode Méditation (Réduction en bas à droite & Réveil à la demande)** :
-  - Cliquez sur **`🧘 Méditer`** (ou réduisez la fenêtre depuis la barre des tâches) : Kaze replie son parchemin et se place en bas à droite de votre écran en posture de méditation.
-  - Cliquez sur **`🌅 Réveiller Kaze`** (ou sur le Samouraï) pour le ramener instantanément à sa position de travail.
-- 👁️ **Conscience Temps Réel (`src/awareness.rs`)** :
-  - Conscient de ses **minuteurs et sessions Pomodoro actifs** à la seconde près (avec barre de progression en direct et réveil automatique à l'échéance).
-  - Conscient de la **RAM, du CPU, des disques, du réseau, de la batterie, du volume audio, des processus principaux actifs, de la branche Git courante, du presse-papiers, des notes** et de sa **mémoire long-terme persistante (`memory.json`)**.
+### 🏮 1. Expérience de Bureau Épurée & Bulle Unique Tout-en-Un
+- **Présence discrète sur le bureau** : Au repos, vous ne voyez **que Kaze** sur son îlot flottant pixel-art avec sa jauge d'XP sous lui. Aucune grande boîte permanente n'encombre l'écran.
+- **Double-clic sur Kaze** : Ouvre / ferme **une seule bulle de dialogue** située **juste au-dessus du personnage**, sa queue descendant précisément vers son chapeau de paille sans aucun vide.
+- **Tout dans la même bulle** :
+  - **En-tête** : Sceau Hanko, humeur, boutons d'action (`[Copier]`, `[.md]`, `[Ouvrir]`, `[Menu]`, `[x]`).
+  - **Bascule de mode d'affichage** :
+    - **Mode Zen** : Affiche uniquement la dernière demande et la réponse actuelle (zéro distraction).
+    - **Mode Échange** : Affiche le fil de discussion complet défilant.
+  - **Zone de saisie intégrée** : Champ de commande et de dialogue directement au bas de la bulle (`Parle à Kaze (/menu, /zazen, /eveil)...`) avec touche Entrée ou bouton `>`.
+
+### 🎴 2. Le Centre de Contrôle (`/menu`) — Vraie Fenêtre Dédiée
+Accessible par la commande `/menu` ou en cliquant sur le bouton **`[Menu]`** de la bulle / de la jauge d'XP. Ouvre une vraie fenêtre de contrôle avec 6 onglets complets :
+1. **🏯 Éveil (Dojo d'apprentissage IA)** : Choix de sujets (Philosophie Zen, Rust, Histoire, Linux...), génération de quiz à 4 choix via Ollama, feedback instantané avec explication détaillée et récompenses en XP.
+2. **🧘 Zazen (Méditation guidée)** : Suivi en direct du cycle 4-3-5 (Inspiration 4s, Rétention 3s, Expiration 5s), Enso calligraphié, chrono, bouton pour envoyer Kaze dans un coin d'écran (`[Coin écran]`) ou le recentrer (`[Recentrer]`).
+3. **🎴 Actions Rapides** : Pomodoros 25m, Sablier thé 3m, Pause 5m, Bilans système (CPU, RAM, Réseau, Batterie), Audio (Volume +/-, Muet), Capture d'écran, Terminal, Presse-papiers.
+4. **📜 Historique & Contexte** : Consultation de tous les échanges, export complet en `.md`, vidage d'historique et état environnemental en direct.
+5. **🛡️ Autorisations (Permissions & Auto-Approbation)** : Configuration détaillée des actions autorisées automatiquement sans pop-up de confirmation vs celles requérant une validation explicite.
+6. **🧠 Mémoire & Compétences** : Mémorisation durable de faits (`memory.json`), consultation des souvenirs, changement de modèle IA Ollama actif et catalogue des skills.
+
+### 🏆 3. Progression, Rangs Samouraï & 3 Voies de Sagesse
+- **Niveaux (1 à 50+) & 8 Rangs** : Progression de `Deshi (Disciple)` à `Satori (Éveillé)`.
+- **3 Voies d'XP Dédiées** :
+  - 🧘 **Voie du Zazen** : +2 XP par souffle complet complété, bonus de session.
+  - 📚 **Voie de l'Éveil** : +15 XP par bonne réponse au Dojo, bonus de série (streaks).
+  - ⚔️ **Voie du Bushidō** : +30 XP par cycle Pomodoro, +6 XP par minuteur, actions système et fidélité quotidienne.
+- **Popups d'XP Flottants** animés au-dessus de l'îlot.
 
 ---
 
@@ -37,60 +43,28 @@
    ```bash
    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
    ```
-2. **Ollama** avec le modèle léger par défaut `qwen2.5:3b` (ou `phi4-mini` / `flint`) :
+2. **Ollama** avec le modèle léger par défaut `qwen2.5:3b` :
    ```bash
    ollama pull qwen2.5:3b
    ```
 
 ---
 
-## 🚀 Compilation & Lancement (Linux, macOS, Windows)
+## 🚀 Compilation & Lancement
 
 ```bash
-# Cloner le dépôt
-git clone https://github.com/Fischer86/ai-pet.git
-cd ai-pet
-
-# Lancer en mode développement
+# Lancer l'application
 cargo run
 
-# Ou compiler un binaire optimisé pour la production
+# Compiler un binaire optimisé pour la production
 cargo build --release
 ./target/release/ai-pet
-```
 
-### Mode Test / Ligne de Commande (`--cli`)
+# Aide en ligne de commande
+cargo run -- --help
 
-```bash
-# Tester le processus d'agent interactif dans le terminal
-cargo run -- --cli "Liste les fichiers du dossier courant"
-
-# Simuler l'acceptation (--yes) ou le refus (--no) de l'action proposée
-cargo run -- --cli "Exécute uname -a" --yes
-cargo run -- --cli "Exécute uname -a" --no
-```
-
----
-
-## 🗂️ Architecture du Projet
-
-```text
-ai-pet/
-├── Cargo.toml          # Dépendances multi-plateformes (egui, eframe, sysinfo, arboard, ureq, x11rb)
-├── Cargo.lock          # Verrouillage exact des dépendances
-├── LICENSE             # Licence MIT
-├── README.md           # Documentation
-├── assets/
-│   ├── fonts/          # Police Pixel-Art PixelifySans.ttf
-│   └── Samurai/        # Sprites pixel-art (1x à 5x : idle, run, jump, attack, swim, x)
-└── src/
-    ├── main.rs         # Boucle graphique, Mode Méditation, UI de confirmation Agent & CLI
-    ├── zen_ui.rs       # Rendu de la bulle Pixel-Art en escalier, palette Zen & particules
-    ├── sprites.rs      # Chargeur et animateur de sprites embarqués (include_bytes!)
-    ├── ollama.rs       # Planificateur d'Agent, confirmation Human-in-the-Loop & synthèse 2 passes
-    ├── awareness.rs    # Conscience temps réel (TimerRegistry, MemoryBank, état système/Git)
-    ├── tasks.rs        # Exécuteur des 22 capacités (système, audio, média, fichiers, notes…)
-    └── kde.rs          # Intégration multi-OS (KWin/EWMH x11rb sur Linux, macOS, Windows)
+# Mode CLI sans interface graphique
+cargo run -- --cli "Liste les fichiers du dossier courant" --yes
 ```
 
 ---

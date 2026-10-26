@@ -116,6 +116,86 @@ pub fn check_ollama_running() -> bool {
         .unwrap_or(false)
 }
 
+pub fn generate_quiz_question(model: &str, topic: &str) -> Result<QuizQuestion, String> {
+    if !check_ollama_running() {
+        let _ = ensure_ollama_started()?;
+    }
+
+    let prompt = format!(
+        "Génère une question d'apprentissage ou de culture générale/technique sur le sujet : « {} ».\n\
+        Fournis exactement 4 options de réponse (A, B, C, D) courtes, claires et plausibles.\n\
+        Indique l'index de la bonne réponse (0 pour A, 1 pour B, 2 pour C, 3 pour D).\n\
+        Fournis une explication enrichissante de 1 ou 2 phrases pour après la réponse.",
+        if topic.trim().is_empty() { "culture générale ou philosophie zen ou code" } else { topic.trim() }
+    );
+
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "question": { "type": "string" },
+            "options": {
+                "type": "array",
+                "items": { "type": "string" },
+                "minItems": 4,
+                "maxItems": 4
+            },
+            "correct_idx": { "type": "integer", "minimum": 0, "maximum": 3 },
+            "explanation": { "type": "string" }
+        },
+        "required": ["question", "options", "correct_idx", "explanation"]
+    });
+
+    let payload = json!({
+        "model": model,
+        "stream": false,
+        "think": false,
+        "format": schema,
+        "options": {
+            "temperature": 0.5
+        },
+        "messages": [
+            {
+                "role": "system",
+                "content": "Tu es le Sensei du Dojo d'apprentissage de Kaze. Tu poses des questions captivantes en français avec 4 choix et une explication zen."
+            },
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ]
+    });
+
+    let resp = ureq::post(&format!("{}/api/chat", OLLAMA_BASE))
+        .timeout(Duration::from_secs(30))
+        .send_json(payload)
+        .map_err(|e| format!("Erreur Ollama ({}) : {}", model, e))?;
+
+    let body: Value = resp.into_json().map_err(|e| e.to_string())?;
+    let raw_content = body
+        .get("message")
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_str())
+        .unwrap_or("{}");
+
+    let parsed: QuizQuestion = serde_json::from_str(raw_content).map_err(|e| {
+        format!("Impossible de parser la question du Dojo : {} (brut: {})", e, raw_content)
+    })?;
+
+    if parsed.options.len() != 4 || parsed.question.trim().is_empty() {
+        return Err("La question générée n'a pas 4 options valides.".into());
+    }
+
+    Ok(parsed)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuizQuestion {
+    pub question: String,
+    pub options: Vec<String>,
+    pub correct_idx: usize,
+    pub explanation: String,
+}
+
 pub fn list_models() -> Result<Vec<(String, f64)>, String> {
     let resp = ureq::get(&format!("{}/api/tags", OLLAMA_BASE))
         .timeout(Duration::from_secs(3))

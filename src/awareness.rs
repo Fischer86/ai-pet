@@ -275,11 +275,14 @@ pub fn build_deep_awareness_context() -> String {
         memory.facts.join(" ; ")
     };
 
+    let progress_summary = crate::progress::Progress::load().summary_for_ai();
+
     format!(
         "=== CONSCIENCE TEMPS RÉEL DE KAZE ===\n\
         • [SYSTÈME & OS] {}\n\
         • [APPLICATIONS ACTIVES (TOP CPU/RAM)] {}\n\
         • [MINUTEURS & POMODORO] {}\n\
+        • [PROGRESSION & RANG] {}\n\
         • [ÉTAT INTERNE DU SAMOURAÏ] {}\n\
         • [ESPACE DE TRAVAIL & GIT] {}\n\
         • [PRESSE-PAPIERS ACTUEL] {}\n\
@@ -288,6 +291,7 @@ pub fn build_deep_awareness_context() -> String {
         sys_ctx,
         top_procs,
         timer_summary,
+        progress_summary,
         self_summary,
         git_ctx,
         clip_preview,

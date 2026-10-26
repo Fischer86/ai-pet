@@ -873,3 +873,142 @@ pub fn start_pomodoro(arg: &str) -> String {
     }
     "⚠️ Erreur lors du démarrage du Pomodoro.".into()
 }
+
+/// Convertit un timestamp UNIX (secondes) en `(année, mois, jour, heure, minute, seconde)` UTC+1.
+fn civil_datetime_now() -> (i32, u32, u32, u32, u32, u32) {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+        + 3600; // Fuseau local approximatif (UTC+1)
+
+    let days = secs.div_euclid(86400);
+    let rem = secs.rem_euclid(86400) as u32;
+    let hour = rem / 3600;
+    let min = (rem % 3600) / 60;
+    let sec = rem % 60;
+
+    // Algorithme de Howard Hinnant (civil_from_days)
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = (yoe as i64 + era * 400) as i32;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if m <= 2 { y + 1 } else { y };
+
+    (year, m, d, hour, min, sec)
+}
+
+/// Exporte la réponse actuelle de Kaze (et l'historique récent de la session) dans un fichier externe `.md`.
+pub fn export_response_to_markdown(
+    custom_arg: &str,
+    response_text: &str,
+    model: &str,
+    mood_label: &str,
+    history: &[crate::ollama::ChatMessage],
+) -> Result<PathBuf, String> {
+    let (year, month, day, hour, min, sec) = civil_datetime_now();
+    let date_human = format!(
+        "{:04}-{:02}-{:02} à {:02}:{:02}:{:02}",
+        year, month, day, hour, min, sec
+    );
+    let date_slug = format!(
+        "{:04}-{:02}-{:02}_{:02}h{:02}m{:02}s",
+        year, month, day, hour, min, sec
+    );
+
+    let trimmed_arg = custom_arg.trim();
+    let target_path = if !trimmed_arg.is_empty() {
+        let mut p = expand_tilde(trimmed_arg);
+        if p.extension().and_then(|e| e.to_str()) != Some("md") {
+            let fname = p
+                .file_name()
+                .map(|f| format!("{}.md", f.to_string_lossy()))
+                .unwrap_or_else(|| format!("kaze_{}.md", date_slug));
+            p.set_file_name(fname);
+        }
+        if p.parent().map(|par| par.as_os_str().is_empty()).unwrap_or(true) {
+            default_exports_dir().join(p)
+        } else {
+            if let Some(par) = p.parent() {
+                let _ = fs::create_dir_all(par);
+            }
+            p
+        }
+    } else {
+        default_exports_dir().join(format!("kaze_reponse_{}.md", date_slug))
+    };
+
+    let mut md = String::new();
+    md.push_str("# 🎋 Parchemin de Kaze (風) — Export Zen\n\n");
+    md.push_str(&format!("- **Date** : {}\n", date_human));
+    md.push_str(&format!("- **Esprit IA (Ollama)** : `{}`\n", model));
+    md.push_str(&format!("- **Posture du Samouraï** : {}\n\n", mood_label));
+    md.push_str("---\n\n");
+    md.push_str("## 💬 Réponse de Kaze\n\n");
+    md.push_str(response_text.trim());
+    md.push_str("\n\n");
+
+    if !history.is_empty() {
+        md.push_str("---\n\n");
+        md.push_str("## 📜 Journal de la session\n\n");
+        for msg in history {
+            let speaker = if msg.role == "user" {
+                "🧑‍💻 **Voyageur**"
+            } else {
+                "🎋 **Kaze (風)**"
+            };
+            md.push_str(&format!("### {}\n\n{}\n\n", speaker, msg.content.trim()));
+        }
+    }
+
+    fs::write(&target_path, md)
+        .map_err(|e| format!("Impossible d'écrire {} : {}", target_path.display(), e))?;
+
+    let _ = kde::send_kde_notification(
+        "📝 Parchemin Markdown exporté",
+        &format!("Enregistré dans {}", target_path.display()),
+    );
+
+    Ok(target_path)
+}
+
+fn default_exports_dir() -> PathBuf {
+    let home = kde::user_home_dir();
+    let docs = home.join("Documents");
+    let base = if docs.is_dir() {
+        docs.join("Kaze_Exports")
+    } else {
+        home.join("Kaze_Exports")
+    };
+    let _ = fs::create_dir_all(&base);
+    base
+}
+
+/// Ouvre un fichier externe (ex: le fichier `.md` exporté) avec l'application par défaut du système.
+pub fn open_file_external(path: &Path) {
+    let p_str = path.to_string_lossy().to_string();
+    if cfg!(target_os = "macos") {
+        let _ = Command::new("open")
+            .arg(&p_str)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+    } else if cfg!(target_os = "windows") {
+        let _ = Command::new("cmd")
+            .args(["/C", "start", "", &p_str])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+    } else {
+        let _ = Command::new("xdg-open")
+            .arg(&p_str)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+    }
+}
