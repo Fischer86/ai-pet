@@ -257,22 +257,58 @@ fn control_audio(arg: &str) -> String {
         return format!("🔊 Volume ajusté : {}", kde::get_audio_volume_summary());
     } else if cfg!(target_os = "macos") {
         let cleaned = a.replace('%', "");
-        if a == "mute" || a == "muet" {
+        if a == "mute" || a == "muet" || a == "toggle" {
             let _ = Command::new("osascript")
-                .args(["-e", "set volume with output muted"])
+                .args(["-e", "set volume output muted not (output muted of (get volume settings))"])
                 .status();
-            return "🔇 Audio macOS coupé.".into();
-        } else if let Ok(n) = cleaned.trim_start_matches('+').parse::<u32>() {
+            return format!("🔊 Audio macOS basculé : {}", kde::get_audio_volume_summary());
+        } else if a == "unmute" {
+            let _ = Command::new("osascript")
+                .args(["-e", "set volume without output muted"])
+                .status();
+            return format!("🔊 Son macOS réactivé : {}", kde::get_audio_volume_summary());
+        } else if let Some(val) = cleaned.strip_prefix('+') {
+            let delta: i32 = val.parse().unwrap_or(10).clamp(1, 50);
+            let script = format!(
+                "set volume output volume ((output volume of (get volume settings)) + {})",
+                delta
+            );
+            let _ = Command::new("osascript").args(["-e", &script]).status();
+            return format!("🔊 Volume macOS : {}", kde::get_audio_volume_summary());
+        } else if let Some(val) = cleaned.strip_prefix('-') {
+            let delta: i32 = val.parse().unwrap_or(10).clamp(1, 50);
+            let script = format!(
+                "set volume output volume ((output volume of (get volume settings)) - {})",
+                delta
+            );
+            let _ = Command::new("osascript").args(["-e", &script]).status();
+            return format!("🔊 Volume macOS : {}", kde::get_audio_volume_summary());
+        } else if let Ok(n) = cleaned.parse::<u32>() {
             let _ = Command::new("osascript")
                 .args(["-e", &format!("set volume output volume {}", n.min(100))])
                 .status();
             return format!("🔊 Volume macOS réglé à {}%.", n.min(100));
         }
+    } else if cfg!(target_os = "windows") {
+        let cleaned = a.replace('%', "");
+        let ps_cmd = if a == "mute" || a == "muet" || a == "toggle" {
+            "(New-Object -ComObject WScript.Shell).SendKeys([char]173)".to_string()
+        } else if cleaned.starts_with('-') {
+            "1..5 | ForEach-Object { (New-Object -ComObject WScript.Shell).SendKeys([char]174) }"
+                .to_string()
+        } else {
+            "1..5 | ForEach-Object { (New-Object -ComObject WScript.Shell).SendKeys([char]175) }"
+                .to_string()
+        };
+        let _ = Command::new("powershell")
+            .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &ps_cmd])
+            .status();
+        return "🔊 Volume Windows ajusté.".into();
     }
     format!("🔊 Volume : {}", kde::get_audio_volume_summary())
 }
 
-/// Contrôle multimédia multi-plateforme (Linux D-Bus MPRIS2, macOS Music/Spotify osascript).
+/// Contrôle multimédia multi-plateforme (Linux D-Bus MPRIS2, macOS Music/Spotify osascript, Windows Media Keys).
 fn control_media(arg: &str) -> String {
     let a = arg.trim().to_lowercase();
     let method = match a.as_str() {
@@ -323,10 +359,30 @@ fn control_media(arg: &str) -> String {
             "Previous" => "previous track",
             _ => "playpause",
         };
-        let _ = Command::new("osascript")
-            .args(["-e", &format!("tell application \"Music\" to {}", osa_cmd)])
-            .status();
+        let script = format!(
+            "if application \"Spotify\" is running then\n\
+                tell application \"Spotify\" to {}\n\
+             else\n\
+                tell application \"Music\" to {}\n\
+             end if",
+            osa_cmd, osa_cmd
+        );
+        let _ = Command::new("osascript").args(["-e", &script]).status();
         return format!("🎵 Commande média ({}) envoyée sur macOS.", method);
+    } else if cfg!(target_os = "windows") {
+        let vk = match method {
+            "Next" => 176,
+            "Previous" => 177,
+            _ => 179,
+        };
+        let ps = format!(
+            "(New-Object -ComObject WScript.Shell).SendKeys([char]{})",
+            vk
+        );
+        let _ = Command::new("powershell")
+            .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &ps])
+            .status();
+        return format!("🎵 Commande média ({}) envoyée sur Windows.", method);
     }
     "🎵 Contrôle média exécuté.".into()
 }
@@ -405,7 +461,20 @@ fn run_desktop_action(arg: &str) -> String {
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
                     .spawn();
-                "🔍 KRunner ouvert sur KDE Plasma.".into()
+                "🔍 KRunner ouvert sur Linux / KDE Plasma.".into()
+            } else if cfg!(target_os = "macos") {
+                let _ = Command::new("osascript")
+                    .args([
+                        "-e",
+                        "tell application \"System Events\" to keystroke space using command down",
+                    ])
+                    .spawn();
+                "🔍 Spotlight ouvert sur macOS.".into()
+            } else if cfg!(target_os = "windows") {
+                let _ = Command::new("explorer.exe")
+                    .arg("shell:::{2559a1f8-21d7-11d4-bdaf-00c04f60b9f0}")
+                    .spawn();
+                "🔍 Recherche Windows ouverte.".into()
             } else {
                 open_application("fichiers")
             }

@@ -218,3 +218,18 @@ impl SpriteAnimator {
         }
     }
 }
+
+/// Charge l'arrière-plan Pixel-Art du Dojo (`assets/background_dojo.jpeg`) pour le mode Fenêtre d'Éveil / Centre de Contrôle.
+pub fn load_dojo_background(ctx: &Context) -> TextureHandle {
+    let bytes = include_bytes!("../assets/background_dojo.jpeg");
+    if let Ok(img) = image::load_from_memory(bytes) {
+        let scaled = img.resize_exact(1376, 768, image::imageops::FilterType::Nearest);
+        let rgba = scaled.to_rgba8();
+        let size = [rgba.width() as usize, rgba.height() as usize];
+        let pixels = rgba.as_flat_samples();
+        let ci = ColorImage::from_rgba_unmultiplied(size, pixels.as_slice());
+        return ctx.load_texture("dojo_background", ci, TextureOptions::NEAREST);
+    }
+    let fallback = ColorImage::new([16, 16], egui::Color32::from_rgb(28, 24, 22));
+    ctx.load_texture("dojo_background_fallback", fallback, TextureOptions::NEAREST)
+}

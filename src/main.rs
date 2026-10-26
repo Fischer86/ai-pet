@@ -7,28 +7,34 @@ mod tasks;
 mod zen_ui;
 
 use eframe::egui::{
-    self, Align, Align2, Color32, FontFamily, FontId, Frame, Key, Layout, Pos2, Rect, RichText,
-    ScrollArea, Sense, Vec2, ViewportBuilder, ViewportCommand, WindowLevel,
+    self, Align, Align2, Color32, CursorIcon, FontFamily, FontId, Frame, Key, Layout, Pos2, Rect,
+    ResizeDirection, RichText, ScrollArea, Sense, TextureHandle, Vec2, ViewportBuilder,
+    ViewportCommand, WindowLevel,
 };
 use ollama::{
     AgentFinalResult, AgentTurnOutcome, ChatMessage, PendingAgentAction, QuizQuestion,
     DEFAULT_MODEL,
 };
-use progress::{ next_rank, rank_for, Progress, XpPath };
-use sprites::{PetMood, SpriteAnimator};
+use progress::{next_rank, progress_file_path, rank_for, Progress, XpPath, HONOR_TITLES};
+use sprites::{load_dojo_background, PetMood, SpriteAnimator};
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 use zen_ui::{
-    draw_outlined_text, draw_pixel_bar, draw_pixel_floating_island, draw_pixel_plate,
-    draw_washi_input_box, draw_washi_speech_bubble, draw_zazen_meditation_halo, fill_px,
-    install_pixel_fonts, zen_button, BreathPhase, BtnKind, ZenPalette, ZenParticles,
+    draw_dojo_background_cover, draw_outlined_text, draw_pixel_bar, draw_pixel_floating_island,
+    draw_pixel_plate, draw_resize_grip, draw_tatami_shadow, draw_washi_input_box,
+    draw_washi_speech_bubble, draw_zazen_meditation_halo, fill_px, install_pixel_fonts, zen_button,
+    zen_quiz_option_card, BreathPhase, BtnKind, ZenPalette, ZenParticles,
 };
 
 const WINDOW_TITLE: &str = "Kaze AI Pet";
-const WIN_WIDTH: f32 = 450.0;
-const WIN_HEIGHT: f32 = 490.0;
+const PET_WIN_WIDTH: f32 = 450.0;
+const PET_WIN_HEIGHT: f32 = 490.0;
+const DEFAULT_DOJO_WIDTH: f32 = 980.0;
+const DEFAULT_DOJO_HEIGHT: f32 = 620.0;
+const MIN_DOJO_WIDTH: f32 = 760.0;
+const MIN_DOJO_HEIGHT: f32 = 500.0;
 
 const ZEN_HAIKUS: &[&str] = &[
     "« L'eau calme reflète la lune sans effort. »",
@@ -47,35 +53,37 @@ pub enum BubbleViewMode {
     Echange,
 }
 
-/// Les 6 onglets du Centre de Contrôle (/menu).
+/// Les 5 Piliers cohérents et volontaires du Dojo (/menu ou /eveil).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuTab {
+    /// 1. Voie de l'Éveil : Enseignement & Énigmes du Sensei
     Eveil,
+    /// 2. Voie du Zazen : Souffle guidé 4-3-5 & Sérénité
     Zazen,
-    Actions,
-    History,
-    Permissions,
-    Spirit,
+    /// 3. Voie du Bushidō : Sabliers Pomodoro & Actions Système
+    Bushido,
+    /// 4. Voies, Titres & Chroniques : EXP, Rangs, Shōgō & Échanges
+    Progression,
+    /// 5. Esprit du Sensei : ROLE.md, Forge kaze-sensei, Autonomie, Mémoire & Sécurité
+    Sensei,
 }
 
 impl MenuTab {
-    const ALL: [MenuTab; 6] = [
+    const ALL: [MenuTab; 5] = [
         Self::Eveil,
         Self::Zazen,
-        Self::Actions,
-        Self::History,
-        Self::Permissions,
-        Self::Spirit,
+        Self::Bushido,
+        Self::Progression,
+        Self::Sensei,
     ];
 
     fn label(&self) -> &'static str {
         match self {
             Self::Eveil => "Éveil",
             Self::Zazen => "Zazen",
-            Self::Actions => "Actions",
-            Self::History => "Échanges",
-            Self::Permissions => "Sécurité",
-            Self::Spirit => "Esprit",
+            Self::Bushido => "Bushidō",
+            Self::Progression => "Voies & Titres",
+            Self::Sensei => "Sensei & IA",
         }
     }
 
@@ -83,10 +91,19 @@ impl MenuTab {
         match self {
             Self::Eveil => ZenPalette::GOLD_LEAF,
             Self::Zazen => ZenPalette::JADE_LIGHT,
-            Self::Actions => ZenPalette::CYAN_SPIRIT,
-            Self::History => ZenPalette::SAKURA,
-            Self::Permissions => ZenPalette::VERMILION,
-            Self::Spirit => ZenPalette::GOLD_LEAF,
+            Self::Bushido => ZenPalette::SAKURA,
+            Self::Progression => ZenPalette::GOLD_LEAF,
+            Self::Sensei => ZenPalette::CYAN_SPIRIT,
+        }
+    }
+
+    fn purpose(&self) -> &'static str {
+        match self {
+            Self::Eveil => "Voie de l'Éveil : Énigmes & Enseignements du Sensei (+XP Éveil)",
+            Self::Zazen => "Voie du Zazen : Respiration 4-3-5 & Sérénité (+XP Zazen)",
+            Self::Bushido => "Voie du Bushidō : Sabliers Pomodoro & Actions Système (+XP Bushidō)",
+            Self::Progression => "Voies, Niveaux, Titres d'Honneur (Shōgō) & Chroniques",
+            Self::Sensei => "Charte ROLE.md, Forge kaze-sensei, Autonomie, Mémoire & Sécurité",
         }
     }
 }
@@ -102,6 +119,7 @@ enum WorkerEvent {
     },
     ModelsLoaded(Vec<String>),
     QuizReady(Result<QuizQuestion, String>),
+    SenseiForged(Result<String, String>),
 }
 
 /// Notification visuelle flottante de gain d'XP (+15 XP Éveil).
@@ -140,6 +158,7 @@ impl Default for QuizState {
 /// État global de l'application Kaze.
 struct KazePetApp {
     animator: SpriteAnimator,
+    dojo_bg_tex: TextureHandle,
     particles: ZenParticles,
     start_time: Instant,
 
@@ -161,9 +180,13 @@ struct KazePetApp {
     last_user_prompt: Option<String>,
     last_kaze_reply: Option<String>,
 
-    // Centre de Contrôle (/menu)
+    // Grande Fenêtre Redimensionnable du Dojo (/menu & /eveil) avec background_dojo.jpeg
     show_control_panel: bool,
     menu_tab: MenuTab,
+    dojo_window_size: Vec2,
+    dojo_large_toggle: bool,
+    saved_pet_pos: Pos2,
+    dojo_pos: Option<Pos2>,
     new_memory_fact_input: String,
 
     // Confirmation d'action d'agent (Human-in-the-Loop)
@@ -176,17 +199,20 @@ struct KazePetApp {
     saved_pos_before_meditation: Pos2,
     screen_size: (f32, f32),
     last_breath_count: u32,
+    dojo_last_breath_count: u32,
 
     // Dojo d'apprentissage (Éveil)
     quiz: QuizState,
 
-    // Entrée texte intégrée dans la bulle
+    // Entrée texte, Modèle & Autonomie du Sensei
     input_text: String,
     focus_input_next: bool,
     is_loading: bool,
+    forging_model: bool,
     active_model: String,
     available_models: Vec<String>,
     history: Vec<ChatMessage>,
+    last_autonomy_pulse: Instant,
 
     // Communication asynchrone
     tx: Sender<WorkerEvent>,
@@ -216,8 +242,12 @@ impl KazePetApp {
         cc.egui_ctx.set_visuals(visuals);
 
         let animator = SpriteAnimator::load(&cc.egui_ctx);
+        let dojo_bg_tex = load_dojo_background(&cc.egui_ctx);
         let (tx, rx) = mpsc::channel();
         let screen_size = kde::detect_primary_screen_size();
+
+        // S'assurer que ROLE.md est prêt dans le dossier applicatif
+        let _ = ollama::role_file_path();
 
         let tx_init = tx.clone();
         let ctx_init = cc.egui_ctx.clone();
@@ -232,23 +262,34 @@ impl KazePetApp {
         let mut progress = Progress::load();
         let mut xp_popups = Vec::new();
         if let Some((daily_xp, streak)) = progress.register_daily_visit() {
-            progress.add_xp(XpPath::Bushido, daily_xp);
+            progress.add_xp_with_log(
+                XpPath::Bushido,
+                daily_xp,
+                &format!("Assiduité quotidienne ({} j)", streak),
+            );
             progress.save();
             xp_popups.push(XpPopup {
                 text: format!("+{} XP Assiduité ({} j)", daily_xp, streak),
                 path: XpPath::Bushido,
                 spawn_time: Instant::now(),
-                pos: Pos2::new(WIN_WIDTH / 2.0, 290.0),
+                pos: Pos2::new(PET_WIN_WIDTH / 2.0, 290.0),
             });
+        } else {
+            progress.save();
         }
 
-        let welcome = "Bienvenue au sanctuaire de Kaze.\n\
-            Double-clique sur moi pour ouvrir ou fermer cette bulle.\n\
-            Tape /menu (ou clique sur Menu) pour ouvrir le Centre de Contrôle.";
+        let (directive_txt, _, _) = progress.current_sensei_directive();
+        let welcome = format!(
+            "Salutation, {} (Nv.{}).\n{}\nDouble-clique sur moi ou ouvre le Dojo pour commencer.",
+            progress.display_title(),
+            progress.global_level().level,
+            directive_txt
+        );
         let welcome_len = welcome.chars().count();
 
         Self {
             animator,
+            dojo_bg_tex,
             particles: ZenParticles::new(),
             start_time: Instant::now(),
             progress,
@@ -258,15 +299,19 @@ impl KazePetApp {
             bubble_anim: 1.0,
             bubble_h_anim: 185.0,
             bubble_view_mode: BubbleViewMode::Zen,
-            full_text: welcome.into(),
+            full_text: welcome.clone(),
             revealed_chars: welcome_len,
             last_typewriter_tick: Instant::now(),
             bubble_feedback: None,
             last_exported_md: None,
             last_user_prompt: None,
-            last_kaze_reply: Some(welcome.into()),
+            last_kaze_reply: Some(welcome),
             show_control_panel: false,
             menu_tab: MenuTab::Eveil,
+            dojo_window_size: Vec2::new(DEFAULT_DOJO_WIDTH, DEFAULT_DOJO_HEIGHT),
+            dojo_large_toggle: false,
+            saved_pet_pos: Pos2::new(220.0, 180.0),
+            dojo_pos: None,
             new_memory_fact_input: String::new(),
             pending_confirmation: None,
             in_zazen: false,
@@ -275,13 +320,16 @@ impl KazePetApp {
             saved_pos_before_meditation: Pos2::new(220.0, 180.0),
             screen_size,
             last_breath_count: 0,
+            dojo_last_breath_count: 0,
             quiz: QuizState::default(),
             input_text: String::new(),
             focus_input_next: true,
             is_loading: false,
+            forging_model: false,
             active_model: DEFAULT_MODEL.to_string(),
             available_models: vec![DEFAULT_MODEL.to_string()],
             history: Vec::new(),
+            last_autonomy_pulse: Instant::now(),
             tx,
             rx,
             roaming_enabled: false,
@@ -294,21 +342,108 @@ impl KazePetApp {
         }
     }
 
-    /// Octroie de l'XP sur une voie, vérifie l'Harmonie du Jour et affiche une notification flottante.
+    /// Ouvre la grande fenêtre redimensionnable du Dojo (`background_dojo.jpeg`) sur l'onglet souhaité.
+    fn open_dojo_window(&mut self, ctx: &egui::Context, tab: MenuTab) {
+        if !self.show_control_panel {
+            self.saved_pet_pos = self.window_pos;
+            self.show_control_panel = true;
+            self.roaming_enabled = false;
+
+            if let Some(mon) = ctx.input(|i| i.viewport().monitor_size) {
+                if mon.x >= 800.0 && mon.y >= 600.0 {
+                    self.screen_size = (mon.x, mon.y);
+                }
+            }
+
+            let (sw, sh) = self.screen_size;
+            let target_pos = self.dojo_pos.unwrap_or_else(|| {
+                Pos2::new(
+                    ((sw - self.dojo_window_size.x) * 0.5).max(30.0),
+                    ((sh - self.dojo_window_size.y) * 0.5).max(30.0),
+                )
+            });
+            self.window_pos = target_pos;
+
+            ctx.send_viewport_cmd(ViewportCommand::Resizable(true));
+            ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(Vec2::new(
+                MIN_DOJO_WIDTH,
+                MIN_DOJO_HEIGHT,
+            )));
+            ctx.send_viewport_cmd(ViewportCommand::InnerSize(self.dojo_window_size));
+            ctx.send_viewport_cmd(ViewportCommand::OuterPosition(target_pos));
+        }
+
+        self.menu_tab = tab;
+        if tab == MenuTab::Eveil && self.quiz.question.is_none() && !self.quiz.loading {
+            self.request_new_quiz_question(ctx);
+        }
+    }
+
+    /// Referme la grande fenêtre du Dojo et ramène Kaze en mode Compagnon transparent sur le bureau.
+    fn close_dojo_window(&mut self, ctx: &egui::Context) {
+        if self.show_control_panel {
+            self.progress.save();
+            self.dojo_pos = Some(self.window_pos);
+            self.show_control_panel = false;
+
+            ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(Vec2::new(
+                PET_WIN_WIDTH,
+                PET_WIN_HEIGHT,
+            )));
+            ctx.send_viewport_cmd(ViewportCommand::InnerSize(Vec2::new(
+                PET_WIN_WIDTH,
+                PET_WIN_HEIGHT,
+            )));
+            ctx.send_viewport_cmd(ViewportCommand::Resizable(false));
+            self.window_pos = self.saved_pet_pos;
+            ctx.send_viewport_cmd(ViewportCommand::OuterPosition(self.saved_pet_pos));
+            kde::enforce_x11_ewmh_top_and_taskbar(WINDOW_TITLE);
+        }
+    }
+
+    /// Bascule entre la taille standard du Dojo (`980x620`) et une grande taille (`1320x800`).
+    fn toggle_dojo_large_size(&mut self, ctx: &egui::Context) {
+        self.dojo_large_toggle = !self.dojo_large_toggle;
+        let (sw, sh) = self.screen_size;
+        self.dojo_window_size = if self.dojo_large_toggle {
+            Vec2::new((sw * 0.78).clamp(1100.0, 1480.0), (sh * 0.78).clamp(680.0, 900.0))
+        } else {
+            Vec2::new(DEFAULT_DOJO_WIDTH, DEFAULT_DOJO_HEIGHT)
+        };
+        let pos = Pos2::new(
+            ((sw - self.dojo_window_size.x) * 0.5).max(20.0),
+            ((sh - self.dojo_window_size.y) * 0.5).max(20.0),
+        );
+        self.window_pos = pos;
+        ctx.send_viewport_cmd(ViewportCommand::InnerSize(self.dojo_window_size));
+        ctx.send_viewport_cmd(ViewportCommand::OuterPosition(pos));
+    }
+
+    /// Octroie de l'XP sur une voie, vérifie l'Harmonie du Jour et les Titres d'Honneur, puis sauvegarde.
     fn grant_xp(&mut self, path: XpPath, amount: u64, reason: &str) {
         let old_level = self.progress.global_level().level;
         let old_path_level = self.progress.path_level(path).level;
-        self.progress.add_xp(path, amount);
+        self.progress.add_xp_with_log(path, amount, reason);
 
-        // Vérifier si l'Harmonie du Jour (3 gestes quotidiens) vient d'être complétée
         let harmony_bonus = if self.progress.check_and_claim_daily_harmony() {
-            self.progress.add_xp(XpPath::Zazen, 10);
-            self.progress.add_xp(XpPath::Eveil, 10);
-            self.progress.add_xp(XpPath::Bushido, 10);
+            self.progress
+                .add_xp_with_log(XpPath::Zazen, 10, "Harmonie du Jour");
+            self.progress
+                .add_xp_with_log(XpPath::Eveil, 10, "Harmonie du Jour");
+            self.progress
+                .add_xp_with_log(XpPath::Bushido, 10, "Harmonie du Jour");
             true
         } else {
             false
         };
+
+        let new_titles = self.progress.refresh_unlocked_titles();
+        if let Some(first_new) = new_titles.first() {
+            if self.progress.equipped_title_id.is_none() {
+                self.progress.equipped_title_id = Some(first_new.id.to_string());
+            }
+        }
+        let unlocked_names: Vec<&'static str> = new_titles.iter().map(|t| t.name).collect();
 
         self.progress.save();
 
@@ -321,11 +456,20 @@ impl KazePetApp {
             format!("+{} XP {}", amount, path.label())
         };
 
+        let popup_pos = if self.show_control_panel {
+            Pos2::new(
+                self.dojo_window_size.x * 0.18,
+                self.dojo_window_size.y * 0.52,
+            )
+        } else {
+            Pos2::new(PET_WIN_WIDTH / 2.0, 295.0)
+        };
+
         self.xp_popups.push(XpPopup {
             text: popup_text,
             path,
             spawn_time: Instant::now(),
-            pos: Pos2::new(WIN_WIDTH / 2.0, 295.0),
+            pos: popup_pos,
         });
 
         if harmony_bonus {
@@ -333,7 +477,16 @@ impl KazePetApp {
                 text: "+30 XP • Harmonie du Jour accomplie !".into(),
                 path: XpPath::Eveil,
                 spawn_time: Instant::now(),
-                pos: Pos2::new(WIN_WIDTH / 2.0, 270.0),
+                pos: popup_pos - Vec2::new(0.0, 24.0),
+            });
+        }
+
+        for (idx, t_name) in unlocked_names.iter().enumerate() {
+            self.xp_popups.push(XpPopup {
+                text: format!("Titre débloqué : « {} » !", t_name),
+                path: XpPath::Eveil,
+                spawn_time: Instant::now(),
+                pos: popup_pos - Vec2::new(0.0, 48.0 + idx as f32 * 22.0),
             });
         }
 
@@ -342,7 +495,7 @@ impl KazePetApp {
             self.animator.set_mood(PetMood::Special, Some(Duration::from_secs(4)));
             self.set_bubble_message(
                 format!(
-                    "ÉLÉVATION ! Tu atteins le Niveau {} — Rang {} ({}).\nTon îlot sanctuaire s'épanouit.",
+                    "ÉLÉVATION ! Tu atteins le Niveau {} — Rang {} ({}).\nTon sanctuaire s'épanouit.",
                     new_level, rank, desc
                 ),
                 true,
@@ -376,7 +529,8 @@ impl KazePetApp {
     fn copy_current_response(&mut self) {
         match kde::write_clipboard_text(&self.full_text) {
             Ok(_) => {
-                self.animator.set_mood(PetMood::Jump, Some(Duration::from_millis(1200)));
+                self.animator
+                    .set_mood(PetMood::Jump, Some(Duration::from_millis(1200)));
                 self.set_feedback("Copié dans le presse-papiers");
             }
             Err(e) => {
@@ -395,7 +549,8 @@ impl KazePetApp {
             &self.history,
         ) {
             Ok(path) => {
-                self.animator.set_mood(PetMood::Special, Some(Duration::from_secs(2)));
+                self.animator
+                    .set_mood(PetMood::Special, Some(Duration::from_secs(2)));
                 let file_name = path
                     .file_name()
                     .map(|f| f.to_string_lossy().to_string())
@@ -411,8 +566,10 @@ impl KazePetApp {
 
     // --- Mode Zazen ---
     fn enter_zazen(&mut self, ctx: &egui::Context, move_to_corner: bool) {
+        if self.show_control_panel {
+            self.close_dojo_window(ctx);
+        }
         self.in_zazen = true;
-        self.show_control_panel = false;
         self.meditation_started_at = Instant::now();
         self.meditation_in_corner = move_to_corner;
         self.last_breath_count = 0;
@@ -429,8 +586,8 @@ impl KazePetApp {
         if move_to_corner {
             self.saved_pos_before_meditation = self.window_pos;
             let (sw, sh) = self.screen_size;
-            let target_x = (sw - WIN_WIDTH + 60.0).max(20.0);
-            let target_y = (sh - WIN_HEIGHT - 36.0).max(20.0);
+            let target_x = (sw - PET_WIN_WIDTH + 60.0).max(20.0);
+            let target_y = (sh - PET_WIN_HEIGHT - 36.0).max(20.0);
             self.window_pos = Pos2::new(target_x, target_y);
             ctx.send_viewport_cmd(ViewportCommand::OuterPosition(self.window_pos));
         }
@@ -472,18 +629,19 @@ impl KazePetApp {
 
         self.in_zazen = false;
         self.bubble_open = true;
-        self.animator.set_mood(PetMood::Jump, Some(Duration::from_secs(3)));
+        self.animator
+            .set_mood(PetMood::Jump, Some(Duration::from_secs(3)));
 
         if self.meditation_in_corner {
             let (sw, sh) = self.screen_size;
             let wake_x = self
                 .saved_pos_before_meditation
                 .x
-                .clamp(20.0, (sw - WIN_WIDTH - 20.0).max(20.0));
+                .clamp(20.0, (sw - PET_WIN_WIDTH - 20.0).max(20.0));
             let wake_y = self
                 .saved_pos_before_meditation
                 .y
-                .clamp(20.0, (sh - WIN_HEIGHT - 60.0).max(20.0));
+                .clamp(20.0, (sh - PET_WIN_HEIGHT - 60.0).max(20.0));
             self.window_pos = Pos2::new(wake_x, wake_y);
             self.meditation_in_corner = false;
             ctx.send_viewport_cmd(ViewportCommand::OuterPosition(self.window_pos));
@@ -506,17 +664,17 @@ impl KazePetApp {
             let wake_x = self
                 .saved_pos_before_meditation
                 .x
-                .clamp(20.0, (sw - WIN_WIDTH - 20.0).max(20.0));
+                .clamp(20.0, (sw - PET_WIN_WIDTH - 20.0).max(20.0));
             let wake_y = self
                 .saved_pos_before_meditation
                 .y
-                .clamp(20.0, (sh - WIN_HEIGHT - 60.0).max(20.0));
+                .clamp(20.0, (sh - PET_WIN_HEIGHT - 60.0).max(20.0));
             self.window_pos = Pos2::new(wake_x, wake_y);
             self.meditation_in_corner = false;
         } else {
             self.saved_pos_before_meditation = self.window_pos;
-            let target_x = (sw - WIN_WIDTH + 60.0).max(20.0);
-            let target_y = (sh - WIN_HEIGHT - 36.0).max(20.0);
+            let target_x = (sw - PET_WIN_WIDTH + 60.0).max(20.0);
+            let target_y = (sh - PET_WIN_HEIGHT - 36.0).max(20.0);
             self.window_pos = Pos2::new(target_x, target_y);
             self.meditation_in_corner = true;
         }
@@ -561,17 +719,33 @@ impl KazePetApp {
             let streak_bonus = (self.quiz.streak as u64 - 1).min(5) * 3;
             let total = base_xp + streak_bonus;
 
-            self.animator.set_mood(PetMood::Jump, Some(Duration::from_secs(3)));
+            self.animator
+                .set_mood(PetMood::Jump, Some(Duration::from_secs(3)));
             self.grant_xp(
                 XpPath::Eveil,
                 total,
                 &format!("Série x{}", self.quiz.streak),
             );
+            self.set_bubble_message(
+                format!(
+                    "Excellente réponse, Maître ! (+{} XP Éveil, Série x{})\n{}",
+                    total, self.quiz.streak, q.explanation
+                ),
+                true,
+            );
         } else {
             self.quiz.was_correct = Some(false);
             self.quiz.streak = 0;
-            self.animator.set_mood(PetMood::Attack, Some(Duration::from_millis(1500)));
+            self.animator
+                .set_mood(PetMood::Attack, Some(Duration::from_millis(1500)));
             self.grant_xp(XpPath::Eveil, 3, "Persévérance");
+            self.set_bubble_message(
+                format!(
+                    "L'erreur est le premier pas vers la maîtrise (+3 XP).\n{}",
+                    q.explanation
+                ),
+                true,
+            );
         }
     }
 
@@ -648,7 +822,6 @@ impl KazePetApp {
     }
 
     fn request_user_confirmation(&mut self, pending: PendingAgentAction) {
-        self.show_control_panel = false;
         self.bubble_open = true;
         self.animator.set_mood(PetMood::Swim, None);
         let prompt_txt = pending.format_confirmation_prompt();
@@ -677,8 +850,11 @@ impl KazePetApp {
         });
     }
 
-    fn confirm_pending_action_silently(&mut self, ctx: &egui::Context, pending: PendingAgentAction) {
-        self.show_control_panel = false;
+    fn confirm_pending_action_silently(
+        &mut self,
+        ctx: &egui::Context,
+        pending: PendingAgentAction,
+    ) {
         self.bubble_open = true;
         self.is_loading = true;
         self.animator.set_mood(pending.mood, None);
@@ -735,14 +911,86 @@ impl KazePetApp {
         }
     }
 
+    /// Déclenche une initiative volontaire et autonome du Sensei Kaze (conseil, observation ou proposition d'action).
+    fn trigger_sensei_initiative(&mut self, ctx: &egui::Context) {
+        if self.is_loading || self.pending_confirmation.is_some() {
+            return;
+        }
+        self.last_autonomy_pulse = Instant::now();
+        self.is_loading = true;
+        self.animator.set_mood(PetMood::Special, None);
+        self.set_bubble_message("Le Sensei observe l'état du sanctuaire…", true);
+
+        let global_lvl = self.progress.global_level();
+        let (dir_title, dir_desc, _) = self.progress.current_sensei_directive();
+        let summary = format!(
+            "Niveau {} ({}) • Zazen Nv.{} ({} souffles aujourd'hui) • Éveil Nv.{} ({} énigmes aujourd'hui) • Bushidō Nv.{} ({} actions aujourd'hui) • Directive prioritaire : {} ({})",
+            global_lvl.level,
+            self.progress.display_title(),
+            self.progress.path_level(XpPath::Zazen).level,
+            self.progress.daily_breaths,
+            self.progress.path_level(XpPath::Eveil).level,
+            self.progress.daily_quizzes,
+            self.progress.path_level(XpPath::Bushido).level,
+            self.progress.daily_actions,
+            dir_title,
+            dir_desc
+        );
+
+        let tx = self.tx.clone();
+        let model = self.active_model.clone();
+        let ctx_clone = ctx.clone();
+
+        std::thread::spawn(move || {
+            let res = ollama::generate_sensei_initiative(&model, &summary);
+            let _ = tx.send(WorkerEvent::PlanReady(res));
+            ctx_clone.request_repaint();
+        });
+    }
+
+    /// Forge (fine-tune via `Modelfile.sensei`) le modèle spécialisé `kaze-sensei:latest` dans Ollama.
+    fn forge_sensei_model_async(&mut self, ctx: &egui::Context) {
+        if self.forging_model {
+            return;
+        }
+        self.forging_model = true;
+        self.animator.set_mood(PetMood::Swim, None);
+        self.set_bubble_message(
+            "Forge spirituelle du modèle spécialisé `kaze-sensei` (Modelfile.sensei) en cours…",
+            true,
+        );
+
+        let base_model = if self.active_model.starts_with("kaze-sensei") {
+            DEFAULT_MODEL.to_string()
+        } else {
+            self.active_model.clone()
+        };
+        let tx = self.tx.clone();
+        let ctx_clone = ctx.clone();
+
+        std::thread::spawn(move || {
+            let res = ollama::forge_sensei_model(&base_model);
+            if let Ok(models) = ollama::list_models() {
+                let names: Vec<String> = models.into_iter().map(|(n, _)| n).collect();
+                let _ = tx.send(WorkerEvent::ModelsLoaded(names));
+            }
+            let _ = tx.send(WorkerEvent::SenseiForged(res));
+            ctx_clone.request_repaint();
+        });
+    }
+
     fn handle_slash_command(&mut self, ctx: &egui::Context, cmd_line: &str) {
         let mut parts = cmd_line.splitn(2, char::is_whitespace);
         let cmd = parts.next().unwrap_or("").to_lowercase();
         let arg = parts.next().unwrap_or("").trim().to_string();
 
         match cmd.as_str() {
-            "/menu" | "/panel" | "/control" => {
-                self.show_control_panel = !self.show_control_panel;
+            "/menu" | "/panel" | "/control" | "/dojo" => {
+                if self.show_control_panel {
+                    self.close_dojo_window(ctx);
+                } else {
+                    self.open_dojo_window(ctx, self.menu_tab);
+                }
             }
             "/zen" => {
                 self.bubble_view_mode = BubbleViewMode::Zen;
@@ -753,11 +1001,19 @@ impl KazePetApp {
                 self.set_bubble_message("Mode Échange activé (fil complet).", true);
             }
             "/close" | "/fermer" => {
-                self.bubble_open = false;
+                if self.show_control_panel {
+                    self.close_dojo_window(ctx);
+                } else {
+                    self.bubble_open = false;
+                }
             }
             "/balade" | "/roam" => {
                 self.roaming_enabled = !self.roaming_enabled;
-                let st = if self.roaming_enabled { "activée" } else { "arrêtée" };
+                let st = if self.roaming_enabled {
+                    "activée"
+                } else {
+                    "arrêtée"
+                };
                 self.set_bubble_message(format!("Balade autonome {}.", st), true);
             }
             "/zazen" | "/meditate" | "/mediter" => {
@@ -765,18 +1021,22 @@ impl KazePetApp {
                 self.enter_zazen(ctx, corner);
             }
             "/eveil" | "/learn" | "/quiz" => {
-                self.show_control_panel = true;
-                self.menu_tab = MenuTab::Eveil;
                 if !arg.is_empty() {
                     self.quiz.topic_input = arg;
                 }
-                if self.quiz.question.is_none() && !self.quiz.loading {
-                    self.request_new_quiz_question(ctx);
-                }
+                self.open_dojo_window(ctx, MenuTab::Eveil);
             }
-            "/xp" | "/niveau" | "/rank" => {
-                self.show_control_panel = true;
-                self.menu_tab = MenuTab::Spirit;
+            "/xp" | "/niveau" | "/rank" | "/voies" | "/titres" => {
+                self.open_dojo_window(ctx, MenuTab::Progression);
+            }
+            "/sensei" | "/auto" => {
+                self.trigger_sensei_initiative(ctx);
+            }
+            "/forge" | "/finetune" => {
+                self.forge_sensei_model_async(ctx);
+            }
+            "/role" => {
+                self.open_dojo_window(ctx, MenuTab::Sensei);
             }
             "/export" | "/md" => {
                 self.export_current_response_md(&arg);
@@ -820,7 +1080,8 @@ impl KazePetApp {
                         .cloned()
                         .unwrap_or(arg);
                     self.active_model = matched.clone();
-                    self.animator.set_mood(PetMood::Jump, Some(Duration::from_secs(2)));
+                    self.animator
+                        .set_mood(PetMood::Jump, Some(Duration::from_secs(2)));
                     self.set_bubble_message(
                         format!("Esprit d'IA changé pour : {}", matched),
                         true,
@@ -837,13 +1098,25 @@ impl KazePetApp {
                 self.execute_or_confirm_command(ctx, cmd_line, "timer_status", "", PetMood::Idle);
             }
             "/cancel" => {
-                self.execute_or_confirm_command(ctx, cmd_line, "cancel_timer", &arg, PetMood::Attack);
+                self.execute_or_confirm_command(
+                    ctx,
+                    cmd_line,
+                    "cancel_timer",
+                    &arg,
+                    PetMood::Attack,
+                );
             }
             "/sys" | "/status" => {
                 self.execute_or_confirm_command(ctx, cmd_line, "system_info", "", PetMood::Special);
             }
             "/top" | "/ps" => {
-                self.execute_or_confirm_command(ctx, cmd_line, "top_processes", "", PetMood::Attack);
+                self.execute_or_confirm_command(
+                    ctx,
+                    cmd_line,
+                    "top_processes",
+                    "",
+                    PetMood::Attack,
+                );
             }
             "/net" | "/ip" => {
                 self.execute_or_confirm_command(ctx, cmd_line, "network_info", "", PetMood::Run);
@@ -852,10 +1125,22 @@ impl KazePetApp {
                 self.execute_or_confirm_command(ctx, cmd_line, "battery_info", "", PetMood::Idle);
             }
             "/vol" => {
-                self.execute_or_confirm_command(ctx, cmd_line, "audio_control", &arg, PetMood::Jump);
+                self.execute_or_confirm_command(
+                    ctx,
+                    cmd_line,
+                    "audio_control",
+                    &arg,
+                    PetMood::Jump,
+                );
             }
             "/media" => {
-                self.execute_or_confirm_command(ctx, cmd_line, "media_control", &arg, PetMood::Jump);
+                self.execute_or_confirm_command(
+                    ctx,
+                    cmd_line,
+                    "media_control",
+                    &arg,
+                    PetMood::Jump,
+                );
             }
             "/shot" => {
                 self.execute_or_confirm_command(ctx, cmd_line, "screenshot", &arg, PetMood::Attack);
@@ -864,7 +1149,13 @@ impl KazePetApp {
                 self.execute_or_confirm_command(ctx, cmd_line, "clipboard_read", "", PetMood::Idle);
             }
             "/copy" => {
-                self.execute_or_confirm_command(ctx, cmd_line, "clipboard_write", &arg, PetMood::Jump);
+                self.execute_or_confirm_command(
+                    ctx,
+                    cmd_line,
+                    "clipboard_write",
+                    &arg,
+                    PetMood::Jump,
+                );
             }
             "/open" => {
                 self.execute_or_confirm_command(ctx, cmd_line, "open_app", &arg, PetMood::Run);
@@ -873,7 +1164,8 @@ impl KazePetApp {
                 self.execute_or_confirm_command(ctx, cmd_line, "list_files", &arg, PetMood::Run);
             }
             "/aware" => {
-                self.animator.set_mood(PetMood::Special, Some(Duration::from_secs(3)));
+                self.animator
+                    .set_mood(PetMood::Special, Some(Duration::from_secs(3)));
                 self.set_bubble_message(awareness::build_deep_awareness_context(), true);
             }
             "/clear" => {
@@ -899,8 +1191,9 @@ impl KazePetApp {
             _ => {
                 self.set_bubble_message(
                     "Commandes du Sanctuaire :\n\
-                    • /menu : ouvre le Centre de Contrôle (Éveil, Zazen, Actions, Sécurité, Esprit)\n\
-                    • /zen ou /echange : change le mode de la bulle\n\
+                    • /menu ou /dojo : ouvre la fenêtre du Dojo (Éveil, Zazen, Bushidō, Voies & Titres, Sensei & IA)\n\
+                    • /sensei : demande une initiative volontaire du Sensei\n\
+                    • /forge : forge le modèle spécialisé `kaze-sensei` (Modelfile.sensei)\n\
                     • /zazen [coin], /eveil [sujet], /pomo 25, /timer 5m, /sys, /top, /vol, /balade, /quit",
                     true,
                 );
@@ -923,7 +1216,7 @@ impl KazePetApp {
     }
 
     fn update_roaming(&mut self, ctx: &egui::Context) {
-        if !self.roaming_enabled || self.is_loading || self.in_zazen {
+        if !self.roaming_enabled || self.is_loading || self.in_zazen || self.show_control_panel {
             return;
         }
         let now = Instant::now();
@@ -946,7 +1239,8 @@ impl KazePetApp {
                 }
                 _ => {
                     self.roam_velocity_x = 0.0;
-                    self.animator.set_mood(PetMood::Special, Some(Duration::from_secs(2)));
+                    self.animator
+                        .set_mood(PetMood::Special, Some(Duration::from_secs(2)));
                 }
             }
             let secs = 2 + (now.elapsed().subsec_nanos() % 4);
@@ -956,7 +1250,7 @@ impl KazePetApp {
         if self.roam_velocity_x.abs() > 0.01 {
             let (sw, _) = self.screen_size;
             let min_x = 20.0;
-            let max_x = (sw - WIN_WIDTH - 20.0).max(min_x);
+            let max_x = (sw - PET_WIN_WIDTH - 20.0).max(min_x);
             let mut next_x = self.window_pos.x + self.roam_velocity_x;
             if next_x <= min_x {
                 next_x = min_x;
@@ -971,10 +1265,1645 @@ impl KazePetApp {
             ctx.send_viewport_cmd(ViewportCommand::OuterPosition(self.window_pos));
         }
     }
+
+    /// Dessine la Grande Fenêtre Redimensionnable du Dojo (`background_dojo.jpeg`) où Kaze
+    /// se tient debout sur le tatami face au jardin de bambous et à l'alcôve Tokonoma.
+    /// Toutes les zones sont 100 % responsives, clippées et dotées de défilement automatique.
+    fn draw_dojo_sanctuary_window(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+        let win_rect = ui.max_rect();
+        let w = win_rect.width().max(360.0);
+        let h = win_rect.height().max(360.0);
+
+        if w >= MIN_DOJO_WIDTH && h >= MIN_DOJO_HEIGHT {
+            self.dojo_window_size = win_rect.size();
+        }
+
+        let elapsed_secs = self.start_time.elapsed().as_secs_f32();
+        let mood_accent = ZenPalette::mood_accent(self.animator.current_mood);
+        let global_lvl = self.progress.global_level();
+        let (rank_title, rank_desc) = rank_for(global_lvl.level);
+        let active_title = self.progress.display_title();
+
+        // 1. Arrière-plan Pixel-Art du Dojo en plein écran (aspect-fill cover)
+        let bg_id = self.dojo_bg_tex.id();
+        draw_dojo_background_cover(ui.painter(), win_rect, bg_id);
+
+        // Pétales de sakura & lucioles flottant dans le Dojo
+        self.particles.update_and_draw(
+            ui.painter(),
+            Pos2::new(w * 0.22, h * 0.54),
+            h * 0.40,
+            elapsed_secs,
+        );
+
+        // =============================================================
+        // 2. BANNIÈRE SUPÉRIEURE D'EXPÉRIENCE, TITRE & FENÊTRE (DRAGGABLE)
+        // =============================================================
+        let top_bar_rect = Rect::from_min_size(Pos2::new(10.0, 8.0), Vec2::new(w - 20.0, 42.0));
+        draw_pixel_plate(
+            ui.painter(),
+            top_bar_rect,
+            Color32::from_rgba_unmultiplied(16, 20, 30, 238),
+            ZenPalette::GOLD_LEAF,
+            Some(self.menu_tab.accent()),
+        );
+
+        let top_inner = top_bar_rect.shrink2(Vec2::new(12.0, 6.0));
+        let mut top_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(top_inner)
+                .layout(Layout::left_to_right(Align::Center)),
+        );
+        top_ui.set_clip_rect(top_inner);
+
+        // Badge Niveau + Titre équipé (cliquable pour ouvrir l'onglet Voies & XP, glissable pour déplacer la fenêtre)
+        let lvl_badge_txt = format!("Nv.{} • {}", global_lvl.level, active_title);
+        let drag_title = top_ui.add(
+            egui::Label::new(
+                RichText::new(&lvl_badge_txt)
+                    .size(13.0)
+                    .color(ZenPalette::GOLD_LEAF),
+            )
+            .sense(Sense::click_and_drag()),
+        );
+        if drag_title.drag_started() {
+            ctx.send_viewport_cmd(ViewportCommand::StartDrag);
+        } else if drag_title.clicked() {
+            self.menu_tab = MenuTab::Progression;
+        }
+
+        top_ui.add_space(10.0);
+
+        // Grande jauge d'XP globale dans la bannière avec progression exacte
+        let xp_bar_w = (w * 0.18).clamp(90.0, 210.0);
+        let (xp_bar_rect, xp_bar_resp) =
+            top_ui.allocate_exact_size(Vec2::new(xp_bar_w, 12.0), Sense::click());
+        draw_pixel_bar(
+            ui.painter(),
+            xp_bar_rect,
+            global_lvl.ratio(),
+            ZenPalette::GOLD_LEAF,
+        );
+        if xp_bar_resp.clicked() {
+            self.menu_tab = MenuTab::Progression;
+        }
+
+        top_ui.add_space(8.0);
+        if w >= 680.0 {
+            top_ui.label(
+                RichText::new(format!(
+                    "{} / {} XP ({}%) • Total {} XP",
+                    global_lvl.into,
+                    global_lvl.need,
+                    global_lvl.percent(),
+                    self.progress.total_xp()
+                ))
+                .size(11.5)
+                .color(ZenPalette::TEXT_LIGHT),
+            );
+        }
+
+        let mut should_close_dojo = false;
+        let mut should_toggle_size = false;
+        top_ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            if zen_button(ui, "Bureau x", BtnKind::Danger, Vec2::new(86.0, 24.0)).clicked() {
+                should_close_dojo = true;
+            }
+            let size_lbl = if self.dojo_large_toggle {
+                "Standard"
+            } else {
+                "Agrandir [ ]"
+            };
+            if zen_button(ui, size_lbl, BtnKind::Paper, Vec2::new(88.0, 24.0)).clicked() {
+                should_toggle_size = true;
+            }
+            if w >= 860.0 {
+                ui.label(
+                    RichText::new(format!("Assiduité {} j", self.progress.visit_streak))
+                        .size(11.0)
+                        .color(ZenPalette::JADE_LIGHT),
+                );
+            }
+        });
+
+        // =============================================================
+        // 3. SCÈNE GAUCHE : KAZE SUR LE TATAMI + CARTE XP DES 3 VOIES + CHAT
+        // =============================================================
+        let left_col_w = (w * 0.31).clamp(235.0, 350.0);
+        let left_x = 12.0;
+        let kaze_cx = left_x + left_col_w * 0.5;
+
+        // Zone basse gauche : Barre de saisie + Carte live des 3 Voies d'XP
+        let chat_bar_rect =
+            Rect::from_min_size(Pos2::new(left_x, h - 42.0), Vec2::new(left_col_w, 30.0));
+        let pathways_card_rect =
+            Rect::from_min_size(Pos2::new(left_x, h - 104.0), Vec2::new(left_col_w, 56.0));
+
+        let kaze_feet_y = (pathways_card_rect.min.y - 6.0).max(200.0);
+        let sprite_h = ((kaze_feet_y - 160.0) * 0.52).clamp(96.0, 178.0);
+        let sprite_w = sprite_h * 1.38;
+
+        // Ombre portée sur le tatami du Dojo sous les sandales de Kaze
+        draw_tatami_shadow(
+            ui.painter(),
+            Pos2::new(kaze_cx - 3.0, kaze_feet_y - 5.0),
+            sprite_w * 0.56,
+        );
+
+        // Ensō lumineux + gain d'XP en direct si l'onglet Zazen est ouvert
+        if self.menu_tab == MenuTab::Zazen {
+            let med_secs = self.start_time.elapsed().as_secs_f32();
+            let (phase, breath_ratio, cycles) = BreathPhase::compute(med_secs);
+            draw_zazen_meditation_halo(
+                ui.painter(),
+                Pos2::new(kaze_cx, kaze_feet_y - sprite_h * 0.46),
+                elapsed_secs,
+                phase,
+                breath_ratio,
+            );
+            if cycles > self.dojo_last_breath_count {
+                if self.dojo_last_breath_count > 0 {
+                    self.progress.meditation_secs += 12;
+                    self.progress.total_breaths += 1;
+                    self.progress.daily_breaths += 1;
+                    self.grant_xp(XpPath::Zazen, 2, "Souffle au Dojo");
+                }
+                self.dojo_last_breath_count = cycles;
+            }
+        }
+
+        // Sprite de Kaze posé sur le tatami
+        let sprite_rect = Rect::from_center_size(
+            Pos2::new(kaze_cx, kaze_feet_y - sprite_h * 0.48),
+            Vec2::new(sprite_w, sprite_h),
+        );
+        let kaze_resp = ui.allocate_rect(sprite_rect, Sense::click());
+        let tex_id = self.animator.current_texture().id();
+        ui.painter().image(
+            tex_id,
+            sprite_rect,
+            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+            Color32::WHITE,
+        );
+
+        if kaze_resp.clicked() {
+            let next_mood = match self.animator.current_mood {
+                PetMood::Idle => PetMood::Attack,
+                PetMood::Attack => PetMood::Jump,
+                _ => PetMood::Special,
+            };
+            self.animator
+                .set_mood(next_mood, Some(Duration::from_millis(1100)));
+        }
+
+        // Bulle Washi de Kaze dans le Dojo (strictement contenue entre le haut et le chapeau de Kaze)
+        let bubble_top = 56.0;
+        let bubble_bottom = (sprite_rect.min.y + 4.0).max(bubble_top + 88.0);
+        let dojo_bubble_rect = Rect::from_min_max(
+            Pos2::new(left_x, bubble_top),
+            Pos2::new(left_x + left_col_w, bubble_bottom),
+        );
+        draw_washi_speech_bubble(ui.painter(), dojo_bubble_rect, mood_accent, 0.96);
+
+        let b_box = Rect::from_min_size(
+            dojo_bubble_rect.min,
+            Vec2::new(
+                dojo_bubble_rect.width(),
+                (dojo_bubble_rect.height() - 15.0).max(40.0),
+            ),
+        )
+        .shrink2(Vec2::new(10.0, 7.0));
+        let mut b_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(b_box)
+                .layout(Layout::top_down(Align::Min)),
+        );
+        b_ui.set_clip_rect(b_box);
+
+        b_ui.horizontal(|ui| {
+            ui.add_space(16.0);
+            ui.label(
+                RichText::new(format!("KAZE • {}", self.animator.current_mood.label()))
+                    .size(10.5)
+                    .color(ZenPalette::VERMILION),
+            );
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                if zen_button(ui, ".md", BtnKind::Paper, Vec2::new(30.0, 16.0)).clicked() {
+                    self.export_current_response_md("");
+                }
+                if zen_button(ui, "Copier", BtnKind::Paper, Vec2::new(44.0, 16.0)).clicked() {
+                    self.copy_current_response();
+                }
+            });
+        });
+        b_ui.add_space(2.0);
+
+        let total_chars = self.full_text.chars().count();
+        let displayed: String = self.full_text.chars().take(self.revealed_chars).collect();
+        let _ = ScrollArea::vertical()
+            .id_salt("dojo_left_bubble_scroll")
+            .max_height((b_box.height() - 22.0).max(28.0))
+            .auto_shrink([false, false])
+            .show(&mut b_ui, |ui| {
+                let lbl = ui.add(
+                    egui::Label::new(
+                        RichText::new(&displayed)
+                            .size(11.5)
+                            .color(ZenPalette::SUMI_INK),
+                    )
+                    .wrap()
+                    .sense(Sense::click()),
+                );
+                if lbl.clicked() && self.revealed_chars < total_chars {
+                    self.revealed_chars = total_chars;
+                }
+            });
+
+        // Carte Live des 3 Voies d'XP sous Kaze (cliquable vers l'onglet Voies & Titres)
+        let card_resp = ui.allocate_rect(pathways_card_rect, Sense::click());
+        draw_pixel_plate(
+            ui.painter(),
+            pathways_card_rect,
+            Color32::from_rgba_unmultiplied(16, 20, 30, 232),
+            ZenPalette::SUMI_INK,
+            Some(ZenPalette::GOLD_LEAF),
+        );
+        if card_resp.clicked() {
+            self.menu_tab = MenuTab::Progression;
+        }
+        let card_inner = pathways_card_rect.shrink2(Vec2::new(8.0, 5.0));
+        let mut c_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(card_inner)
+                .layout(Layout::top_down(Align::Min)),
+        );
+        c_ui.set_clip_rect(card_inner);
+        c_ui.horizontal(|ui| {
+            ui.label(
+                RichText::new("MAÎTRISE DES 3 VOIES")
+                    .size(10.0)
+                    .color(ZenPalette::GOLD_LEAF),
+            );
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.label(
+                    RichText::new("Voir titres >")
+                        .size(9.5)
+                        .color(ZenPalette::TEXT_DIM),
+                );
+            });
+        });
+        c_ui.add_space(2.0);
+        let col_3_w = ((card_inner.width() - 12.0) / 3.0).max(40.0);
+        c_ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            for path in XpPath::ALL {
+                let pl = self.progress.path_level(path);
+                ui.vertical(|ui| {
+                    ui.set_width(col_3_w);
+                    ui.label(
+                        RichText::new(format!("{} Nv.{}", path.label(), pl.level))
+                            .size(10.0)
+                            .color(path.color()),
+                    );
+                    let (b_rect, _) =
+                        ui.allocate_exact_size(Vec2::new(col_3_w, 6.0), Sense::hover());
+                    draw_pixel_bar(ui.painter(), b_rect, pl.ratio(), path.color());
+                });
+            }
+        });
+
+        // Barre de dialogue rapide tout en bas à gauche
+        draw_washi_input_box(ui.painter(), chat_bar_rect, false);
+        let chat_inner = chat_bar_rect.shrink2(Vec2::new(6.0, 3.0));
+        let mut chat_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(chat_inner)
+                .layout(Layout::left_to_right(Align::Center)),
+        );
+        chat_ui.set_clip_rect(chat_inner);
+        chat_ui.label(RichText::new("›").size(14.0).color(ZenPalette::VERMILION));
+        let edit_w = (chat_inner.width() - 46.0).max(60.0);
+        let chat_edit = egui::TextEdit::singleline(&mut self.input_text)
+            .frame(false)
+            .hint_text(
+                RichText::new("Parler au Sensei Kaze…")
+                    .size(11.0)
+                    .color(ZenPalette::SUMI_MUTED),
+            )
+            .font(FontId::new(11.5, FontFamily::Proportional))
+            .desired_width(edit_w)
+            .text_color(ZenPalette::SUMI_INK);
+        let chat_resp = chat_ui.add_enabled(!self.is_loading, chat_edit);
+        let chat_enter = chat_resp.lost_focus() && chat_ui.input(|i| i.key_pressed(Key::Enter));
+        let chat_send = zen_button(
+            &mut chat_ui,
+            if self.is_loading { "…" } else { ">" },
+            BtnKind::Primary,
+            Vec2::new(24.0, 20.0),
+        )
+        .clicked();
+        if (chat_enter || chat_send) && !self.is_loading {
+            let msg = std::mem::take(&mut self.input_text);
+            self.submit_input(ctx, msg);
+        }
+
+        // =============================================================
+        // 4. COLONNE DROITE : DIRECTIVE DU SENSEI + 5 ONGLETS COHÉRENTS
+        // =============================================================
+        let right_x = left_x + left_col_w + 12.0;
+        let right_w = (w - right_x - 10.0).max(240.0);
+
+        // 4A. Bannière de Directive Volontaire du Sensei (menu proactif)
+        let (dir_title, dir_desc, dir_path) = self.progress.current_sensei_directive();
+        let dir_rect = Rect::from_min_size(Pos2::new(right_x, 54.0), Vec2::new(right_w, 34.0));
+        draw_pixel_plate(
+            ui.painter(),
+            dir_rect,
+            Color32::from_rgba_unmultiplied(20, 25, 36, 236),
+            ZenPalette::SUMI_INK,
+            Some(dir_path.color()),
+        );
+        let dir_inner = dir_rect.shrink2(Vec2::new(10.0, 4.0));
+        let mut dir_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(dir_inner)
+                .layout(Layout::left_to_right(Align::Center)),
+        );
+        dir_ui.set_clip_rect(dir_inner);
+
+        let mut follow_directive = false;
+        let mut ask_sensei_now = false;
+        dir_ui.label(
+            RichText::new(format!("DIRECTIVE DU SENSEI : {}", dir_title))
+                .size(11.0)
+                .color(dir_path.color()),
+        );
+        if right_w >= 540.0 {
+            dir_ui.label(
+                RichText::new(format!("• {}", dir_desc))
+                    .size(10.5)
+                    .color(ZenPalette::TEXT_DIM),
+            );
+        }
+        dir_ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            if zen_button(
+                ui,
+                "Suivre >",
+                BtnKind::Selected(dir_path.color()),
+                Vec2::new(72.0, 22.0),
+            )
+            .clicked()
+            {
+                follow_directive = true;
+            }
+            if zen_button(
+                ui,
+                "Initiative Sensei",
+                BtnKind::Paper,
+                Vec2::new(112.0, 22.0),
+            )
+            .clicked()
+            {
+                ask_sensei_now = true;
+            }
+        });
+
+        if follow_directive {
+            self.menu_tab = match dir_path {
+                XpPath::Zazen => MenuTab::Zazen,
+                XpPath::Eveil => MenuTab::Eveil,
+                XpPath::Bushido => MenuTab::Bushido,
+            };
+            if self.menu_tab == MenuTab::Eveil && self.quiz.question.is_none() && !self.quiz.loading
+            {
+                self.request_new_quiz_question(ctx);
+            }
+        }
+        if ask_sensei_now {
+            self.trigger_sensei_initiative(ctx);
+        }
+
+        // 4B. Barre d'onglets cohérente (5 piliers larges et lisibles : 1/5e de right_w chacun)
+        let tabs_rect = Rect::from_min_size(Pos2::new(right_x, 92.0), Vec2::new(right_w, 28.0));
+        let mut tabs_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(tabs_rect)
+                .layout(Layout::left_to_right(Align::Center)),
+        );
+        tabs_ui.set_clip_rect(tabs_rect);
+        let tab_spacing = 6.0;
+        tabs_ui.spacing_mut().item_spacing.x = tab_spacing;
+        let tab_count = MenuTab::ALL.len() as f32;
+        let tab_btn_w = ((right_w - tab_spacing * (tab_count - 1.0)) / tab_count)
+            .floor()
+            .max(44.0);
+
+        for tab in MenuTab::ALL {
+            let sel = self.menu_tab == tab;
+            let kind = if sel {
+                BtnKind::Selected(tab.accent())
+            } else {
+                BtnKind::Secondary
+            };
+            let resp = zen_button(&mut tabs_ui, tab.label(), kind, Vec2::new(tab_btn_w, 26.0));
+            if resp.clicked() {
+                self.menu_tab = tab;
+                if tab == MenuTab::Eveil && self.quiz.question.is_none() && !self.quiz.loading {
+                    self.request_new_quiz_question(ctx);
+                }
+            }
+            resp.on_hover_text(tab.purpose());
+        }
+
+        // 4C. Grand panneau de contenu strictement clippé et doté d'un ScrollArea vertical
+        let panel_top = 124.0;
+        let panel_h = (h - panel_top - 12.0).max(180.0);
+        let panel_rect =
+            Rect::from_min_size(Pos2::new(right_x, panel_top), Vec2::new(right_w, panel_h));
+
+        draw_pixel_plate(
+            ui.painter(),
+            panel_rect,
+            Color32::from_rgba_unmultiplied(18, 22, 32, 228),
+            self.menu_tab.accent(),
+            Some(self.menu_tab.accent()),
+        );
+
+        let inner = panel_rect.shrink2(Vec2::new(14.0, 12.0));
+        let mut p_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(inner)
+                .layout(Layout::top_down(Align::Min)),
+        );
+        p_ui.set_clip_rect(inner);
+
+        let _ = ScrollArea::vertical()
+            .id_salt(("dojo_tab_scroll", self.menu_tab.label()))
+            .max_height(inner.height())
+            .auto_shrink([false, false])
+            .show(&mut p_ui, |ui| {
+                let avail_w = ui.available_width().max(180.0);
+
+                match self.menu_tab {
+                    MenuTab::Eveil => {
+                        let p_eveil = self.progress.path_level(XpPath::Eveil);
+                        let mastery = XpPath::Eveil.mastery_title(p_eveil.level);
+
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                RichText::new("DOJO D'ÉVEIL — ENSEIGNEMENT DU SENSEI")
+                                    .size(14.5)
+                                    .color(ZenPalette::GOLD_LEAF),
+                            );
+                            ui.label(
+                                RichText::new(format!(
+                                    "• Nv.{} « {} » ({} / {} XP) • Série : {} (Record : {})",
+                                    p_eveil.level,
+                                    mastery,
+                                    p_eveil.into,
+                                    p_eveil.need,
+                                    self.quiz.streak,
+                                    self.progress.best_streak
+                                ))
+                                .size(11.5)
+                                .color(ZenPalette::JADE_LIGHT),
+                            );
+                        });
+                        ui.add_space(4.0);
+
+                        let (eveil_bar, _) =
+                            ui.allocate_exact_size(Vec2::new(avail_w, 8.0), Sense::hover());
+                        draw_pixel_bar(
+                            ui.painter(),
+                            eveil_bar,
+                            p_eveil.ratio(),
+                            ZenPalette::GOLD_LEAF,
+                        );
+                        ui.add_space(8.0);
+
+                        // Barre de choix du sujet responsive
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("Sujet :")
+                                    .size(12.0)
+                                    .color(ZenPalette::TEXT_LIGHT),
+                            );
+                            let btn_new_w = 128.0;
+                            let topic_w = (ui.available_width() - btn_new_w - 14.0).max(80.0);
+                            let edit = egui::TextEdit::singleline(&mut self.quiz.topic_input)
+                                .hint_text("Ex: Philosophie Zen, Rust, Linux, Histoire...")
+                                .desired_width(topic_w)
+                                .font(FontId::new(12.5, FontFamily::Proportional));
+                            let resp = ui.add(edit);
+                            let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+
+                            if zen_button(
+                                ui,
+                                "Nouvelle Énigme >",
+                                BtnKind::Primary,
+                                Vec2::new(btn_new_w, 24.0),
+                            )
+                            .clicked()
+                                || enter
+                            {
+                                self.request_new_quiz_question(ctx);
+                            }
+                        });
+                        ui.add_space(6.0);
+
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = Vec2::new(5.0, 5.0);
+                            for &(lbl, topic) in &[
+                                ("Zen & Bushidō", "Philosophie Zen & Bushidō"),
+                                ("Rust & Systèmes", "Programmation Rust & Architecture Système"),
+                                ("Japon Féodal", "Histoire et Culture du Japon Féodal"),
+                                ("Linux & Sécurité", "Administration Linux, Réseau & Cybersécurité"),
+                                ("Algorithmique", "Structures de données & Algorithmique"),
+                                ("Sciences & Cosmos", "Physique, Astronomie & Sciences"),
+                            ] {
+                                if zen_button(ui, lbl, BtnKind::Secondary, Vec2::new(108.0, 22.0))
+                                    .clicked()
+                                {
+                                    self.quiz.topic_input = topic.to_string();
+                                    self.request_new_quiz_question(ctx);
+                                }
+                            }
+                        });
+                        ui.add_space(10.0);
+
+                        if self.quiz.loading {
+                            let (wait_rect, _) = ui.allocate_exact_size(
+                                Vec2::new(avail_w, 96.0),
+                                Sense::hover(),
+                            );
+                            draw_pixel_plate(
+                                ui.painter(),
+                                wait_rect,
+                                ZenPalette::WASHI_BG,
+                                ZenPalette::SUMI_INK,
+                                Some(ZenPalette::GOLD_LEAF),
+                            );
+                            ui.painter().text(
+                                wait_rect.center(),
+                                Align2::CENTER_CENTER,
+                                format!(
+                                    "Le Sensei médite et prépare une énigme sur « {} »…",
+                                    self.quiz.topic_input
+                                ),
+                                FontId::new(13.0, FontFamily::Proportional),
+                                ZenPalette::SUMI_INK,
+                            );
+                        } else if let Some(err) = self.quiz.error.clone() {
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(format!("Erreur : {}", err))
+                                        .size(12.0)
+                                        .color(ZenPalette::SAKURA),
+                                )
+                                .wrap(),
+                            );
+                            ui.add_space(6.0);
+                            if zen_button(
+                                ui,
+                                "Réessayer l'énigme",
+                                BtnKind::Primary,
+                                Vec2::new(140.0, 26.0),
+                            )
+                            .clicked()
+                            {
+                                self.request_new_quiz_question(ctx);
+                            }
+                        } else if let Some(q) = self.quiz.question.clone() {
+                            let q_card_h = 78.0;
+                            let (q_rect, _) = ui.allocate_exact_size(
+                                Vec2::new(avail_w, q_card_h),
+                                Sense::hover(),
+                            );
+                            draw_pixel_plate(
+                                ui.painter(),
+                                q_rect,
+                                ZenPalette::WASHI_BG,
+                                ZenPalette::SUMI_INK,
+                                Some(ZenPalette::VERMILION),
+                            );
+                            let q_inner = q_rect.shrink2(Vec2::new(12.0, 8.0));
+                            let mut q_ui = ui.new_child(
+                                egui::UiBuilder::new()
+                                    .max_rect(q_inner)
+                                    .layout(Layout::top_down(Align::Min)),
+                            );
+                            q_ui.set_clip_rect(q_inner);
+                            let _ = ScrollArea::vertical()
+                                .id_salt("dojo_question_scroll")
+                                .max_height(q_inner.height())
+                                .show(&mut q_ui, |ui| {
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(&q.question)
+                                                .size(13.5)
+                                                .color(ZenPalette::SUMI_INK),
+                                        )
+                                        .wrap(),
+                                    );
+                                });
+
+                            ui.add_space(10.0);
+
+                            // Cartes de réponses 100 % responsives (grille 2x2 si large, 1 colonne si étroit)
+                            let answered = self.quiz.selected_option.is_some();
+                            let mut chosen_idx = None;
+                            let two_cols = avail_w >= 460.0;
+                            let card_h = 54.0;
+
+                            let option_kind = |idx: usize| -> BtnKind {
+                                if let Some(sel) = self.quiz.selected_option {
+                                    if idx == q.correct_idx {
+                                        BtnKind::Success
+                                    } else if idx == sel {
+                                        BtnKind::Danger
+                                    } else {
+                                        BtnKind::Secondary
+                                    }
+                                } else {
+                                    BtnKind::Paper
+                                }
+                            };
+
+                            if two_cols {
+                                let card_w = ((avail_w - 10.0) * 0.5).floor();
+                                for pair in [0usize, 1, 2, 3].chunks(2) {
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().item_spacing.x = 10.0;
+                                        for &idx in pair {
+                                            let opt = q
+                                                .options
+                                                .get(idx)
+                                                .map(|s| s.as_str())
+                                                .unwrap_or("");
+                                            let prefix = ["A", "B", "C", "D"][idx];
+                                            if zen_quiz_option_card(
+                                                ui,
+                                                prefix,
+                                                opt,
+                                                option_kind(idx),
+                                                Vec2::new(card_w, card_h),
+                                            )
+                                            .clicked()
+                                                && !answered
+                                            {
+                                                chosen_idx = Some(idx);
+                                            }
+                                        }
+                                    });
+                                    ui.add_space(8.0);
+                                }
+                            } else {
+                                for idx in 0..4 {
+                                    let opt =
+                                        q.options.get(idx).map(|s| s.as_str()).unwrap_or("");
+                                    let prefix = ["A", "B", "C", "D"][idx];
+                                    if zen_quiz_option_card(
+                                        ui,
+                                        prefix,
+                                        opt,
+                                        option_kind(idx),
+                                        Vec2::new(avail_w, card_h),
+                                    )
+                                    .clicked()
+                                        && !answered
+                                    {
+                                        chosen_idx = Some(idx);
+                                    }
+                                    ui.add_space(6.0);
+                                }
+                            }
+
+                            if let Some(idx) = chosen_idx {
+                                self.answer_quiz(idx);
+                            }
+
+                            if let Some(correct) = self.quiz.was_correct {
+                                ui.add_space(4.0);
+                                let (tag, col) = if correct {
+                                    (
+                                        "Réponse exacte ! La Voie de l'Éveil s'élève.",
+                                        ZenPalette::JADE_LIGHT,
+                                    )
+                                } else {
+                                    (
+                                        "Réponse incorrecte — chaque essai forge l'esprit (+3 XP).",
+                                        ZenPalette::SAKURA,
+                                    )
+                                };
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label(RichText::new(tag).size(12.5).color(col));
+                                    if zen_button(
+                                        ui,
+                                        "Énigme suivante >",
+                                        BtnKind::Primary,
+                                        Vec2::new(142.0, 26.0),
+                                    )
+                                    .clicked()
+                                    {
+                                        self.request_new_quiz_question(ctx);
+                                    }
+                                });
+                                ui.add_space(4.0);
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(&q.explanation)
+                                            .size(12.0)
+                                            .color(ZenPalette::TEXT_LIGHT),
+                                    )
+                                    .wrap(),
+                                );
+                            }
+                        }
+                    }
+
+                    MenuTab::Zazen => {
+                        let p_zazen = self.progress.path_level(XpPath::Zazen);
+                        let mastery = XpPath::Zazen.mastery_title(p_zazen.level);
+                        ui.label(
+                            RichText::new("SANCTUAIRE ZAZEN — RESPIRATION & COHÉRENCE")
+                                .size(14.5)
+                                .color(ZenPalette::JADE_LIGHT),
+                        );
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(format!(
+                                    "Voie du Zazen Nv.{} « {} » ({} / {} XP) • Total médité : {} min ({} sessions • {} souffles)",
+                                    p_zazen.level,
+                                    mastery,
+                                    p_zazen.into,
+                                    p_zazen.need,
+                                    self.progress.meditation_secs / 60,
+                                    self.progress.meditation_sessions,
+                                    self.progress.total_breaths
+                                ))
+                                .size(11.5)
+                                .color(ZenPalette::TEXT_DIM),
+                            )
+                            .wrap(),
+                        );
+                        ui.add_space(6.0);
+                        let (z_bar, _) =
+                            ui.allocate_exact_size(Vec2::new(avail_w, 8.0), Sense::hover());
+                        draw_pixel_bar(ui.painter(), z_bar, p_zazen.ratio(), ZenPalette::JADE_LIGHT);
+                        ui.add_space(12.0);
+
+                        let med_secs = self.start_time.elapsed().as_secs_f32();
+                        let (phase, breath_ratio, cycles) = BreathPhase::compute(med_secs);
+                        let haiku = ZEN_HAIKUS[(cycles as usize) % ZEN_HAIKUS.len()];
+
+                        let (phase_txt, phase_col) = match phase {
+                            BreathPhase::Inhale => (
+                                "INSPIRATION LENTE PAR LE NEZ (4s)",
+                                ZenPalette::JADE_LIGHT,
+                            ),
+                            BreathPhase::Hold => {
+                                ("RÉTENTION SEREINE DU SOUFFLE (3s)", ZenPalette::GOLD_LEAF)
+                            }
+                            BreathPhase::Exhale => (
+                                "EXPIRATION PROFONDE & RELÂCHEMENT (5s)",
+                                ZenPalette::SAKURA,
+                            ),
+                        };
+
+                        ui.label(RichText::new(phase_txt).size(13.5).color(phase_col));
+                        ui.add_space(6.0);
+                        let (b_rect, _) =
+                            ui.allocate_exact_size(Vec2::new(avail_w, 14.0), Sense::hover());
+                        draw_pixel_bar(ui.painter(), b_rect, breath_ratio, phase.color());
+                        ui.add_space(10.0);
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(haiku).size(12.5).color(ZenPalette::WASHI_BG),
+                            )
+                            .wrap(),
+                        );
+                        ui.add_space(12.0);
+
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(
+                                    "Chaque cycle de souffle complet dans cet onglet vous octroie automatiquement +2 XP Zazen et sauvegarde votre progression.\n\
+                                    Vous pouvez aussi lancer le mode Zazen flottant directement sur votre bureau :",
+                                )
+                                .size(11.5)
+                                .color(ZenPalette::TEXT_LIGHT),
+                            )
+                            .wrap(),
+                        );
+                        ui.add_space(12.0);
+
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
+                            if zen_button(
+                                ui,
+                                "Zazen sur le Bureau",
+                                BtnKind::Primary,
+                                Vec2::new(155.0, 30.0),
+                            )
+                            .clicked()
+                            {
+                                self.enter_zazen(ctx, false);
+                            }
+                            if zen_button(
+                                ui,
+                                "Zazen dans le Coin",
+                                BtnKind::Secondary,
+                                Vec2::new(155.0, 30.0),
+                            )
+                            .clicked()
+                            {
+                                self.enter_zazen(ctx, true);
+                            }
+                            let roam_lbl = if self.roaming_enabled {
+                                "Balade Bureau : ON"
+                            } else {
+                                "Balade Bureau : OFF"
+                            };
+                            if zen_button(ui, roam_lbl, BtnKind::Paper, Vec2::new(145.0, 30.0))
+                                .clicked()
+                            {
+                                self.roaming_enabled = !self.roaming_enabled;
+                            }
+                        });
+                    }
+
+                    MenuTab::Bushido => {
+                        let p_bushido = self.progress.path_level(XpPath::Bushido);
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                RichText::new("VOIE DU BUSHIDŌ — ACTION JUSTE & MAÎTRISE SYSTÈME")
+                                    .size(14.5)
+                                    .color(ZenPalette::CYAN_SPIRIT),
+                            );
+                            ui.label(
+                                RichText::new(format!(
+                                    "• Nv.{} « {} » ({} / {} XP)",
+                                    p_bushido.level,
+                                    XpPath::Bushido.mastery_title(p_bushido.level),
+                                    p_bushido.into,
+                                    p_bushido.need
+                                ))
+                                .size(11.5)
+                                .color(ZenPalette::SAKURA),
+                            );
+                        });
+                        ui.add_space(6.0);
+
+                        // Affichage en direct des sabliers / Pomodoros actifs
+                        let active_timers = awareness::global_timers()
+                            .lock()
+                            .map(|reg| reg.active.clone())
+                            .unwrap_or_default();
+                        if !active_timers.is_empty() {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(
+                                    RichText::new("Sabliers en cours :")
+                                        .size(11.5)
+                                        .color(ZenPalette::JADE_LIGHT),
+                                );
+                                for t in &active_timers {
+                                    let rem = t.remaining().as_secs();
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "[#{} {} — {:02}:{:02}]",
+                                            t.id,
+                                            t.label,
+                                            rem / 60,
+                                            rem % 60
+                                        ))
+                                        .size(11.5)
+                                        .color(ZenPalette::GOLD_LEAF),
+                                    );
+                                }
+                            });
+                            ui.add_space(6.0);
+                        }
+
+                        let groups: &[(&str, &[(&str, &str)])] = &[
+                            (
+                                "Rituels Zen & Concentration (+XP Bushidō)",
+                                &[
+                                    ("Pomodoro 25m", "/pomo 25"),
+                                    ("Focus Court 15m", "/pomo 15"),
+                                    ("Sablier Thé 3m", "/timer 3m Thé"),
+                                    ("Annuler Sabliers", "/cancel all"),
+                                ],
+                            ),
+                            (
+                                "Vigilance Système & Ressources (Linux / macOS / Windows)",
+                                &[
+                                    ("Bilan OS Complet", "/sys"),
+                                    ("Processus & RAM", "/top"),
+                                    ("Réseau & IP", "/net"),
+                                    ("État Batterie", "/bat"),
+                                ],
+                            ),
+                            (
+                                "Harmonie Audio & Multimédia",
+                                &[
+                                    ("Volume -10%", "/vol -10"),
+                                    ("Volume +10%", "/vol +10"),
+                                    ("Couper le Son", "/vol mute"),
+                                    ("Play / Pause", "/media toggle"),
+                                ],
+                            ),
+                            (
+                                "Outils du Sanctuaire & Bureau",
+                                &[
+                                    ("Capture d'écran", "/shot"),
+                                    ("Lister Dossier ~", "/ls"),
+                                    ("Ouvrir Terminal", "/open terminal"),
+                                    ("Lire Presse-papiers", "/clip"),
+                                ],
+                            ),
+                        ];
+
+                        let cols = if avail_w >= 480.0 { 4.0 } else { 2.0 };
+                        let btn_w = ((avail_w - (cols - 1.0) * 8.0) / cols).floor().max(80.0);
+                        let mut triggered_cmd: Option<String> = None;
+
+                        for (group_title, items) in groups {
+                            ui.label(
+                                RichText::new(*group_title)
+                                    .size(12.0)
+                                    .color(ZenPalette::GOLD_LEAF),
+                            );
+                            ui.add_space(3.0);
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing = Vec2::new(8.0, 6.0);
+                                for (lbl, cmd) in *items {
+                                    if zen_button(
+                                        ui,
+                                        lbl,
+                                        BtnKind::Secondary,
+                                        Vec2::new(btn_w, 28.0),
+                                    )
+                                    .clicked()
+                                    {
+                                        triggered_cmd = Some((*cmd).to_string());
+                                    }
+                                }
+                            });
+                            ui.add_space(8.0);
+                        }
+
+                        if let Some(cmd) = triggered_cmd {
+                            self.submit_input(ctx, cmd);
+                        }
+                    }
+
+                    MenuTab::Progression => {
+                        // =========================================================
+                        // ONGLET VOIES, EXPÉRIENCE, TITRES & CHRONIQUES
+                        // =========================================================
+                        let next_str = next_rank(global_lvl.level)
+                            .map(|(nl, nr)| format!("Prochain rang : {} au Nv.{}", nr, nl))
+                            .unwrap_or_else(|| "Rang ultime Satori atteint".into());
+
+                        // 1. Carte du Rang Global & Sauvegarde
+                        let hero_h = 84.0;
+                        let (hero_rect, _) =
+                            ui.allocate_exact_size(Vec2::new(avail_w, hero_h), Sense::hover());
+                        draw_pixel_plate(
+                            ui.painter(),
+                            hero_rect,
+                            Color32::from_rgba_unmultiplied(24, 30, 44, 240),
+                            ZenPalette::GOLD_LEAF,
+                            Some(ZenPalette::GOLD_LEAF),
+                        );
+                        let h_in = hero_rect.shrink2(Vec2::new(12.0, 8.0));
+                        let mut h_ui = ui.new_child(
+                            egui::UiBuilder::new()
+                                .max_rect(h_in)
+                                .layout(Layout::top_down(Align::Min)),
+                        );
+                        h_ui.set_clip_rect(h_in);
+                        h_ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(format!(
+                                    "NIVEAU {} • {}",
+                                    global_lvl.level, active_title
+                                ))
+                                .size(14.0)
+                                .color(ZenPalette::GOLD_LEAF),
+                            );
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if zen_button(
+                                    ui,
+                                    "Sauvegarder",
+                                    BtnKind::Paper,
+                                    Vec2::new(92.0, 20.0),
+                                )
+                                .clicked()
+                                {
+                                    self.progress.save();
+                                    self.set_feedback("Progression sauvegardée (progress.json)");
+                                }
+                                ui.label(
+                                    RichText::new(format!("Total : {} XP", self.progress.total_xp()))
+                                        .size(11.5)
+                                        .color(ZenPalette::JADE_LIGHT),
+                                );
+                            });
+                        });
+                        h_ui.label(
+                            RichText::new(format!(
+                                "Rang : {} — « {} » ({})",
+                                rank_title, rank_desc, next_str
+                            ))
+                            .size(11.0)
+                            .color(ZenPalette::TEXT_DIM),
+                        );
+                        h_ui.add_space(4.0);
+                        let (g_bar, _) =
+                            h_ui.allocate_exact_size(Vec2::new(h_in.width(), 12.0), Sense::hover());
+                        draw_pixel_bar(
+                            ui.painter(),
+                            g_bar,
+                            global_lvl.ratio(),
+                            ZenPalette::GOLD_LEAF,
+                        );
+                        ui.painter().text(
+                            g_bar.center(),
+                            Align2::CENTER_CENTER,
+                            format!(
+                                "{} / {} XP vers Nv.{} ({}%)",
+                                global_lvl.into,
+                                global_lvl.need,
+                                global_lvl.level + 1,
+                                global_lvl.percent()
+                            ),
+                            FontId::new(10.0, FontFamily::Proportional),
+                            ZenPalette::WASHI_BG,
+                        );
+
+                        ui.add_space(10.0);
+
+                        // 2. Les Trois Voies de Sagesse (Zazen, Éveil, Bushidō)
+                        ui.label(
+                            RichText::new("LES TROIS VOIES DE PROGRESSION")
+                                .size(13.0)
+                                .color(ZenPalette::GOLD_LEAF),
+                        );
+                        ui.add_space(4.0);
+
+                        for path in XpPath::ALL {
+                            let pl = self.progress.path_level(path);
+                            let m_title = path.mastery_title(pl.level);
+                            let p_xp = self.progress.path_xp(path);
+                            let card_h = 62.0;
+                            let (p_rect, _) =
+                                ui.allocate_exact_size(Vec2::new(avail_w, card_h), Sense::hover());
+                            draw_pixel_plate(
+                                ui.painter(),
+                                p_rect,
+                                Color32::from_rgba_unmultiplied(22, 26, 38, 230),
+                                ZenPalette::SUMI_INK,
+                                Some(path.color()),
+                            );
+                            let p_in = p_rect.shrink2(Vec2::new(10.0, 6.0));
+                            let mut path_ui = ui.new_child(
+                                egui::UiBuilder::new()
+                                    .max_rect(p_in)
+                                    .layout(Layout::top_down(Align::Min)),
+                            );
+                            path_ui.set_clip_rect(p_in);
+                            path_ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{} ({}) • Nv.{} « {} »",
+                                        path.label(),
+                                        path.subtitle(),
+                                        pl.level,
+                                        m_title
+                                    ))
+                                    .size(12.0)
+                                    .color(path.color()),
+                                );
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "{} / {} XP ({}% • Total {} XP)",
+                                            pl.into,
+                                            pl.need,
+                                            pl.percent(),
+                                            p_xp
+                                        ))
+                                        .size(11.0)
+                                        .color(ZenPalette::TEXT_LIGHT),
+                                    );
+                                });
+                            });
+                            let (pb_rect, _) = path_ui
+                                .allocate_exact_size(Vec2::new(p_in.width(), 8.0), Sense::hover());
+                            draw_pixel_bar(ui.painter(), pb_rect, pl.ratio(), path.color());
+                            path_ui.add_space(2.0);
+                            path_ui.label(
+                                RichText::new(path.how_to())
+                                    .size(10.5)
+                                    .color(ZenPalette::TEXT_DIM),
+                            );
+                            ui.add_space(6.0);
+                        }
+
+                        // 3. Galerie des Titres d'Honneur (Shōgō) déblocables et équipables
+                        ui.add_space(4.0);
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                RichText::new("TITRES D'HONNEUR (SHŌGŌ) — CLIQUEZ POUR ÉQUIPER")
+                                    .size(13.0)
+                                    .color(ZenPalette::GOLD_LEAF),
+                            );
+                            if self.progress.equipped_title_id.is_some() {
+                                if zen_button(
+                                    ui,
+                                    "Utiliser Rang par défaut",
+                                    BtnKind::Secondary,
+                                    Vec2::new(150.0, 20.0),
+                                )
+                                .clicked()
+                                {
+                                    self.progress.equipped_title_id = None;
+                                    self.progress.save();
+                                }
+                            }
+                        });
+                        ui.add_space(4.0);
+
+                        let title_btn_w = if avail_w >= 500.0 {
+                            ((avail_w - 12.0) / 3.0).floor()
+                        } else {
+                            ((avail_w - 6.0) / 2.0).floor()
+                        };
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
+                            for t in HONOR_TITLES {
+                                let unlocked = self.progress.is_title_unlocked(t.id);
+                                let equipped =
+                                    self.progress.equipped_title_id.as_deref() == Some(t.id);
+                                let label = if equipped {
+                                    format!("★ {}", t.name)
+                                } else if unlocked {
+                                    t.name.to_string()
+                                } else {
+                                    format!("🔒 {}", t.name)
+                                };
+                                let kind = if equipped {
+                                    BtnKind::Selected(t.category.color())
+                                } else if unlocked {
+                                    BtnKind::Paper
+                                } else {
+                                    BtnKind::Secondary
+                                };
+                                let resp =
+                                    zen_button(ui, &label, kind, Vec2::new(title_btn_w, 26.0));
+                                if resp.clicked() && unlocked {
+                                    self.progress.equipped_title_id = Some(t.id.to_string());
+                                    self.progress.save();
+                                }
+                                resp.on_hover_text(format!(
+                                    "{}\nCondition : {}\nStatut : {}",
+                                    t.name,
+                                    t.condition_desc,
+                                    if equipped {
+                                        "Équipé actuellement"
+                                    } else if unlocked {
+                                        "Débloqué (cliquer pour équiper)"
+                                    } else {
+                                        "Verrouillé"
+                                    }
+                                ));
+                            }
+                        });
+
+                        ui.add_space(10.0);
+
+                        // 4. Harmonie du Jour & Journal des derniers gains d'XP
+                        ui.label(
+                            RichText::new(format!(
+                                "Harmonie du Jour (+30 XP) : Souffles Zazen {}/3 • Énigme d'Éveil {}/1 • Action {}/1",
+                                self.progress.daily_breaths.min(3),
+                                self.progress.daily_quizzes.min(1),
+                                self.progress.daily_actions.min(1),
+                            ))
+                            .size(11.5)
+                            .color(ZenPalette::JADE_LIGHT),
+                        );
+
+                        if !self.progress.recent_xp_log.is_empty() {
+                            ui.add_space(4.0);
+                            ui.label(
+                                RichText::new("Derniers gains d'expérience enregistrés :")
+                                    .size(11.0)
+                                    .color(ZenPalette::TEXT_DIM),
+                            );
+                            for entry in self.progress.recent_xp_log.iter().take(4) {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "  • +{} XP {} — {}",
+                                        entry.amount,
+                                        entry.path.label(),
+                                        entry.reason
+                                    ))
+                                    .size(11.0)
+                                    .color(entry.path.color()),
+                                );
+                            }
+                        }
+
+                        ui.add_space(10.0);
+
+                        // 5. Chroniques des échanges de la session & Export .md
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                RichText::new(format!(
+                                    "CHRONIQUES DES ÉCHANGES ({} messages)",
+                                    self.history.len()
+                                ))
+                                .size(12.5)
+                                .color(ZenPalette::SAKURA),
+                            );
+                            if zen_button(
+                                ui,
+                                "Exporter en .md",
+                                BtnKind::Paper,
+                                Vec2::new(118.0, 20.0),
+                            )
+                            .clicked()
+                            {
+                                self.export_current_response_md("historique_complet");
+                            }
+                            if zen_button(ui, "Effacer", BtnKind::Danger, Vec2::new(70.0, 20.0))
+                                .clicked()
+                            {
+                                self.history.clear();
+                            }
+                        });
+                        for msg in self.history.iter().rev().take(4) {
+                            let (who, col) = if msg.role == "user" {
+                                ("Vous", ZenPalette::GOLD_LEAF)
+                            } else {
+                                ("Sensei Kaze", ZenPalette::VERMILION)
+                            };
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(RichText::new(format!("{} : ", who)).size(11.0).color(col));
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(&msg.content)
+                                            .size(11.0)
+                                            .color(ZenPalette::TEXT_LIGHT),
+                                    )
+                                    .wrap(),
+                                );
+                            });
+                        }
+
+                        ui.add_space(6.0);
+                        ui.label(
+                            RichText::new(format!(
+                                "Sauvegarde persistante : {}",
+                                progress_file_path().display()
+                            ))
+                            .size(10.0)
+                            .color(ZenPalette::TEXT_DIM),
+                        );
+                    }
+
+                    MenuTab::Sensei => {
+                        // =========================================================
+                        // ONGLET SENSEI & IA : RÔLE.MD, FINE-TUNING OLLAMA, AUTONOMIE & SÉCURITÉ
+                        // =========================================================
+                        ui.label(
+                            RichText::new(
+                                "ESPRIT DU SENSEI — RÔLE, MODÈLE SPÉCIALISÉ & AUTONOMIE",
+                            )
+                            .size(14.5)
+                            .color(ZenPalette::VERMILION),
+                        );
+                        ui.add_space(6.0);
+
+                        // 1. Carte Modèle Ollama & Fine-Tuning `kaze-sensei` (Modelfile.sensei)
+                        let model_card_h = 88.0;
+                        let (m_rect, _) = ui
+                            .allocate_exact_size(Vec2::new(avail_w, model_card_h), Sense::hover());
+                        draw_pixel_plate(
+                            ui.painter(),
+                            m_rect,
+                            Color32::from_rgba_unmultiplied(24, 28, 42, 238),
+                            ZenPalette::VERMILION,
+                            Some(ZenPalette::GOLD_LEAF),
+                        );
+                        let m_in = m_rect.shrink2(Vec2::new(10.0, 7.0));
+                        let mut m_ui = ui.new_child(
+                            egui::UiBuilder::new()
+                                .max_rect(m_in)
+                                .layout(Layout::top_down(Align::Min)),
+                        );
+                        m_ui.set_clip_rect(m_in);
+
+                        let is_sensei_model = self.active_model.starts_with("kaze-sensei");
+                        m_ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                RichText::new(format!("Modèle actif : {}", self.active_model))
+                                    .size(12.5)
+                                    .color(if is_sensei_model {
+                                        ZenPalette::JADE_LIGHT
+                                    } else {
+                                        ZenPalette::GOLD_LEAF
+                                    }),
+                            );
+                            if zen_button(
+                                ui,
+                                "Changer de modèle",
+                                BtnKind::Secondary,
+                                Vec2::new(128.0, 22.0),
+                            )
+                            .clicked()
+                            {
+                                self.cycle_model();
+                            }
+                            let forge_lbl = if self.forging_model {
+                                "Forge en cours…"
+                            } else if is_sensei_model {
+                                "Re-forger kaze-sensei"
+                            } else {
+                                "Forger kaze-sensei (Fine-tune)"
+                            };
+                            if zen_button(
+                                ui,
+                                forge_lbl,
+                                BtnKind::Primary,
+                                Vec2::new(196.0, 22.0),
+                            )
+                            .clicked()
+                                && !self.forging_model
+                            {
+                                self.forge_sensei_model_async(ctx);
+                            }
+                        });
+                        m_ui.add_space(4.0);
+                        m_ui.add(
+                            egui::Label::new(
+                                RichText::new(
+                                    "« Forger kaze-sensei » compile `Modelfile.sensei` + `ROLE.md` dans Ollama (température 0.32, exemples few-shot Sensei, mémoire autonome `auto_remember`).",
+                                )
+                                .size(10.5)
+                                .color(ZenPalette::TEXT_DIM),
+                            )
+                            .wrap(),
+                        );
+
+                        ui.add_space(10.0);
+
+                        // 2. Autonomie Volontaire & Charte `ROLE.md`
+                        ui.horizontal_wrapped(|ui| {
+                            let (auto_lbl, auto_kind) = if self.progress.sensei_autonomy {
+                                ("Autonomie Sensei : ACTIVE", BtnKind::Success)
+                            } else {
+                                ("Autonomie Sensei : PAUSE", BtnKind::Secondary)
+                            };
+                            if zen_button(ui, auto_lbl, auto_kind, Vec2::new(178.0, 26.0)).clicked()
+                            {
+                                self.progress.sensei_autonomy = !self.progress.sensei_autonomy;
+                                self.progress.save();
+                            }
+                            if zen_button(
+                                ui,
+                                "Demander une Initiative maintenant",
+                                BtnKind::Paper,
+                                Vec2::new(210.0, 26.0),
+                            )
+                            .clicked()
+                            {
+                                self.trigger_sensei_initiative(ctx);
+                            }
+                            if zen_button(
+                                ui,
+                                "Ouvrir ROLE.md",
+                                BtnKind::Secondary,
+                                Vec2::new(112.0, 26.0),
+                            )
+                            .clicked()
+                            {
+                                tasks::open_file_external(&ollama::role_file_path());
+                            }
+                        });
+
+                        ui.add_space(10.0);
+
+                        // 3. Mémoire Long-Terme Autonome (`memory.json`)
+                        ui.label(
+                            RichText::new(
+                                "MÉMOIRE LONG-TERME DU SENSEI (AUTO-MÉMORISATION & FAITS)",
+                            )
+                            .size(12.5)
+                            .color(ZenPalette::GOLD_LEAF),
+                        );
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            let mem_btn_w = 104.0;
+                            let mem_edit_w = (ui.available_width() - mem_btn_w - 10.0).max(80.0);
+                            let edit = egui::TextEdit::singleline(&mut self.new_memory_fact_input)
+                                .hint_text("Confier un fait ou objectif au Sensei (memory.json)...")
+                                .desired_width(mem_edit_w)
+                                .font(FontId::new(11.5, FontFamily::Proportional));
+                            ui.add(edit);
+                            if zen_button(
+                                ui,
+                                "+ Mémoriser",
+                                BtnKind::Primary,
+                                Vec2::new(mem_btn_w, 22.0),
+                            )
+                            .clicked()
+                            {
+                                let fact = std::mem::take(&mut self.new_memory_fact_input);
+                                if !fact.trim().is_empty() {
+                                    let _ = awareness::remember_fact(&fact);
+                                }
+                            }
+                        });
+                        let facts = awareness::load_memory().facts;
+                        if facts.is_empty() {
+                            ui.label(
+                                RichText::new("Le Sensei mémorisera automatiquement vos objectifs et préférences au fil des échanges.")
+                                    .size(11.0)
+                                    .color(ZenPalette::TEXT_DIM),
+                            );
+                        } else {
+                            for f in facts.iter().rev().take(4) {
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(format!("• {}", f))
+                                            .size(11.0)
+                                            .color(ZenPalette::TEXT_LIGHT),
+                                    )
+                                    .wrap(),
+                                );
+                            }
+                        }
+
+                        ui.add_space(10.0);
+
+                        // 4. Autorisations d'Action Automatique (Garde-fous)
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                RichText::new("AUTORISATIONS D'ACTION DE L'AGENT")
+                                    .size(12.5)
+                                    .color(ZenPalette::GOLD_LEAF),
+                            );
+                            if zen_button(
+                                ui,
+                                "Mode Zen (Recommandé)",
+                                BtnKind::Paper,
+                                Vec2::new(148.0, 22.0),
+                            )
+                            .clicked()
+                            {
+                                self.progress.permissions.set_zen_balanced();
+                                self.progress.save();
+                            }
+                            if zen_button(
+                                ui,
+                                "Mode Strict",
+                                BtnKind::Secondary,
+                                Vec2::new(98.0, 22.0),
+                            )
+                            .clicked()
+                            {
+                                self.progress.permissions.set_strict_all();
+                                self.progress.save();
+                            }
+                        });
+                        ui.add_space(6.0);
+
+                        let mut changed = false;
+                        let mut perm_row =
+                            |ui: &mut egui::Ui, val: &mut bool, label: &str, warn: bool| {
+                                ui.horizontal(|ui| {
+                                    let (txt, kind) = if *val {
+                                        (
+                                            "Autorisé (Auto)",
+                                            if warn {
+                                                BtnKind::Danger
+                                            } else {
+                                                BtnKind::Success
+                                            },
+                                        )
+                                    } else {
+                                        ("Confirmation requise", BtnKind::Secondary)
+                                    };
+                                    if zen_button(ui, txt, kind, Vec2::new(142.0, 22.0)).clicked() {
+                                        *val = !*val;
+                                        changed = true;
+                                    }
+                                    ui.add_space(6.0);
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(label)
+                                                .size(11.0)
+                                                .color(ZenPalette::TEXT_LIGHT),
+                                        )
+                                        .wrap(),
+                                    );
+                                });
+                                ui.add_space(3.0);
+                            };
+
+                        perm_row(
+                            ui,
+                            &mut self.progress.permissions.auto_allow_system_info,
+                            "Bilans Système (CPU, RAM, Disque, Réseau, Batterie)",
+                            false,
+                        );
+                        perm_row(
+                            ui,
+                            &mut self.progress.permissions.auto_allow_media_audio,
+                            "Contrôle Audio, Multimédia & Captures d'écran",
+                            false,
+                        );
+                        perm_row(
+                            ui,
+                            &mut self.progress.permissions.auto_allow_timers,
+                            "Minuteurs & Sessions Pomodoro Zen",
+                            false,
+                        );
+                        perm_row(
+                            ui,
+                            &mut self.progress.permissions.auto_allow_read_notes_mem,
+                            "Consultation des Notes & Mémoire long-terme",
+                            false,
+                        );
+                        perm_row(
+                            ui,
+                            &mut self.progress.permissions.auto_allow_read_files,
+                            "Exploration & Lecture de fichiers (~)",
+                            false,
+                        );
+                        perm_row(
+                            ui,
+                            &mut self.progress.permissions.auto_allow_apps_url,
+                            "Ouverture d'applications & Liens web",
+                            false,
+                        );
+                        perm_row(
+                            ui,
+                            &mut self.progress.permissions.auto_allow_shell,
+                            "Commandes Shell libres (Sensible — confirmation recommandée)",
+                            true,
+                        );
+
+                        if changed {
+                            self.progress.save();
+                        }
+                    }
+                }
+            });
+
+        // =============================================================
+        // 5. POIGNÉE DE REDIMENSIONNEMENT (BAS-DROITE & BORDS)
+        // =============================================================
+        let grip_rect =
+            Rect::from_min_size(Pos2::new(w - 26.0, h - 26.0), Vec2::new(26.0, 26.0));
+        let grip_resp = ui.allocate_rect(grip_rect, Sense::click_and_drag());
+        if grip_resp.hovered() || grip_resp.dragged() {
+            ctx.set_cursor_icon(CursorIcon::ResizeNwSe);
+        }
+        draw_resize_grip(
+            ui.painter(),
+            win_rect.max,
+            grip_resp.hovered() || grip_resp.dragged(),
+        );
+        if grip_resp.drag_started() {
+            ctx.send_viewport_cmd(ViewportCommand::BeginResize(ResizeDirection::SouthEast));
+        }
+        if grip_resp.dragged() {
+            let delta = grip_resp.drag_delta();
+            if delta.length_sq() > 0.1 {
+                self.dojo_window_size.x = (self.dojo_window_size.x + delta.x).max(MIN_DOJO_WIDTH);
+                self.dojo_window_size.y = (self.dojo_window_size.y + delta.y).max(MIN_DOJO_HEIGHT);
+                ctx.send_viewport_cmd(ViewportCommand::InnerSize(self.dojo_window_size));
+            }
+        }
+
+        if should_toggle_size {
+            self.toggle_dojo_large_size(ctx);
+        }
+        if should_close_dojo {
+            self.close_dojo_window(ctx);
+        }
+    }
 }
 
 impl eframe::App for KazePetApp {
-    /// FOND 100 % TRANSPARENT : élimine définitivement le carré noir derrière Kaze !
+    /// FOND 100 % TRANSPARENT en mode Compagnon : élimine définitivement le carré noir derrière Kaze !
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         [0.0, 0.0, 0.0, 0.0]
     }
@@ -1023,8 +2952,8 @@ impl eframe::App for KazePetApp {
 
         for exp in expired_timers {
             self.bubble_open = true;
-            self.show_control_panel = false;
-            self.animator.set_mood(PetMood::Jump, Some(Duration::from_secs(5)));
+            self.animator
+                .set_mood(PetMood::Jump, Some(Duration::from_secs(5)));
             let title = if exp.is_pomodoro {
                 self.progress.pomodoros_done += 1;
                 self.progress.daily_actions += 1;
@@ -1108,7 +3037,11 @@ impl eframe::App for KazePetApp {
                 }
                 WorkerEvent::ModelsLoaded(models) => {
                     if !models.is_empty() {
-                        if !models.contains(&self.active_model) {
+                        if let Some(sensei) =
+                            models.iter().find(|m| m.starts_with("kaze-sensei"))
+                        {
+                            self.active_model = sensei.clone();
+                        } else if !models.contains(&self.active_model) {
                             if let Some(qwen) = models.iter().find(|m| m.starts_with("qwen2.5")) {
                                 self.active_model = qwen.clone();
                             } else {
@@ -1132,7 +3065,33 @@ impl eframe::App for KazePetApp {
                         }
                     }
                 }
+                WorkerEvent::SenseiForged(res) => {
+                    self.forging_model = false;
+                    match res {
+                        Ok(msg) => {
+                            self.active_model = ollama::SENSEI_MODEL_NAME.to_string();
+                            self.animator
+                                .set_mood(PetMood::Jump, Some(Duration::from_secs(3)));
+                            self.grant_xp(XpPath::Bushido, 20, "Forge du modèle Sensei");
+                            self.set_bubble_message(msg, true);
+                        }
+                        Err(err) => {
+                            self.animator.set_mood(PetMood::Idle, None);
+                            self.set_bubble_message(format!("Erreur de forge : {}", err), true);
+                        }
+                    }
+                }
             }
+        }
+
+        // Impulsion d'autonomie périodique du Sensei (toutes les 4 minutes d'inactivité)
+        if self.progress.sensei_autonomy
+            && !self.is_loading
+            && !self.in_zazen
+            && self.pending_confirmation.is_none()
+            && self.last_autonomy_pulse.elapsed() >= Duration::from_secs(240)
+        {
+            self.trigger_sensei_initiative(ctx);
         }
 
         // Raccourcis clavier globaux
@@ -1145,7 +3104,7 @@ impl eframe::App for KazePetApp {
             }
         } else if ctx.input(|i| i.key_pressed(Key::Escape)) {
             if self.show_control_panel {
-                self.show_control_panel = false;
+                self.close_dojo_window(ctx);
             } else if self.in_zazen {
                 self.leave_zazen(ctx);
             } else if self.bubble_open {
@@ -1213,1323 +3172,657 @@ impl eframe::App for KazePetApp {
 
         let panel_frame = Frame::NONE.fill(Color32::TRANSPARENT);
         egui::CentralPanel::default().frame(panel_frame).show(ctx, |ui| {
-            let cx = WIN_WIDTH / 2.0;
-            let island_bob = if self.in_zazen {
-                (elapsed_secs * 1.4).sin() * 3.5
-            } else {
-                (elapsed_secs * 2.1).sin() * 2.2
-            };
-
-            // Point d'ancrage vertical de l'îlot et du chapeau de Kaze
-            let island_y = 392.0 + island_bob;
-            let hat_top_y = (island_y - 84.0).round();
-
             // =============================================================
-            // 1. ZONE DU SAMOURAÏ & SON ÎLOT SANCTUAIRE ÉVOLUTIF
+            // MODE A : GRANDE FENÊTRE REDIMENSIONNABLE DU DOJO (background_dojo.jpeg)
             // =============================================================
-            let pet_rect = Rect::from_center_size(
-                Pos2::new(cx, island_y - 36.0),
-                Vec2::new(148.0, 112.0),
-            );
-            let pet_resp = ui.allocate_rect(pet_rect, Sense::click_and_drag());
-
-            if self.in_zazen {
-                let (phase, breath_ratio, _) =
-                    BreathPhase::compute(self.meditation_started_at.elapsed().as_secs_f32());
-                let center_halo = Pos2::new(cx, island_y - 40.0);
-                draw_zazen_meditation_halo(
-                    ui.painter(),
-                    center_halo,
-                    elapsed_secs,
-                    phase,
-                    breath_ratio,
-                );
-                draw_pixel_floating_island(
-                    ui.painter(),
-                    Pos2::new(cx, island_y),
-                    elapsed_secs,
-                    phase.color(),
-                    global_lvl.level,
-                );
+            if self.show_control_panel {
+                self.draw_dojo_sanctuary_window(ctx, ui);
             } else {
-                self.particles.update_and_draw(
-                    ui.painter(),
-                    Pos2::new(cx, island_y - 40.0),
-                    95.0,
-                    elapsed_secs,
-                );
-                draw_pixel_floating_island(
-                    ui.painter(),
-                    Pos2::new(cx, island_y),
-                    elapsed_secs,
-                    mood_accent,
-                    global_lvl.level,
-                );
-            }
-
-            let tex_id = self.animator.current_texture().id();
-            let sprite_rect = Rect::from_center_size(
-                Pos2::new(cx + 6.0, island_y - 42.0),
-                Vec2::new(124.0, 88.0),
-            );
-            ui.painter().image(
-                tex_id,
-                sprite_rect,
-                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                Color32::WHITE,
-            );
-
-            // Interactions sur Kaze :
-            // - Double-clic ou clic droit : ouvre / ferme la bulle unique
-            // - Clic simple : animation de posture (+1 XP doux avec cooldown)
-            // - Glisser : déplace la fenêtre sur le bureau
-            if pet_resp.double_clicked() || pet_resp.secondary_clicked() {
-                if self.show_control_panel {
-                    self.show_control_panel = false;
-                    self.bubble_open = true;
-                    self.focus_input_next = true;
+                // =============================================================
+                // MODE B : COMPAGNON FLOTTANT TRANSPARENT SUR LE BUREAU
+                // =============================================================
+                let cx = PET_WIN_WIDTH / 2.0;
+                let island_bob = if self.in_zazen {
+                    (elapsed_secs * 1.4).sin() * 3.5
                 } else {
+                    (elapsed_secs * 2.1).sin() * 2.2
+                };
+
+                let island_y = 392.0 + island_bob;
+                let hat_top_y = (island_y - 84.0).round();
+
+                // 1. Samouraï Kaze sur son îlot flottant évolutif
+                let pet_rect = Rect::from_center_size(
+                    Pos2::new(cx, island_y - 36.0),
+                    Vec2::new(148.0, 112.0),
+                );
+                let pet_resp = ui.allocate_rect(pet_rect, Sense::click_and_drag());
+
+                if self.in_zazen {
+                    let (phase, breath_ratio, _) =
+                        BreathPhase::compute(self.meditation_started_at.elapsed().as_secs_f32());
+                    let center_halo = Pos2::new(cx, island_y - 40.0);
+                    draw_zazen_meditation_halo(
+                        ui.painter(),
+                        center_halo,
+                        elapsed_secs,
+                        phase,
+                        breath_ratio,
+                    );
+                    draw_pixel_floating_island(
+                        ui.painter(),
+                        Pos2::new(cx, island_y),
+                        elapsed_secs,
+                        phase.color(),
+                        global_lvl.level,
+                    );
+                } else {
+                    self.particles.update_and_draw(
+                        ui.painter(),
+                        Pos2::new(cx, island_y - 40.0),
+                        95.0,
+                        elapsed_secs,
+                    );
+                    draw_pixel_floating_island(
+                        ui.painter(),
+                        Pos2::new(cx, island_y),
+                        elapsed_secs,
+                        mood_accent,
+                        global_lvl.level,
+                    );
+                }
+
+                let tex_id = self.animator.current_texture().id();
+                let sprite_rect = Rect::from_center_size(
+                    Pos2::new(cx + 6.0, island_y - 42.0),
+                    Vec2::new(124.0, 88.0),
+                );
+                ui.painter().image(
+                    tex_id,
+                    sprite_rect,
+                    Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                    Color32::WHITE,
+                );
+
+                if pet_resp.double_clicked() || pet_resp.secondary_clicked() {
                     self.bubble_open = !self.bubble_open;
                     if self.bubble_open {
                         self.focus_input_next = true;
                     }
-                }
-            } else if pet_resp.clicked() {
-                let next_mood = match self.animator.current_mood {
-                    PetMood::Idle => PetMood::Attack,
-                    PetMood::Attack => PetMood::Jump,
-                    _ => PetMood::Special,
-                };
-                self.animator
-                    .set_mood(next_mood, Some(Duration::from_millis(1100)));
-                if self.last_pat_xp.elapsed() >= Duration::from_secs(45) {
-                    self.last_pat_xp = Instant::now();
-                    self.grant_xp(XpPath::Bushido, 1, "Salut au sabre");
-                }
-            }
-
-            if pet_resp.drag_started() {
-                ctx.send_viewport_cmd(ViewportCommand::StartDrag);
-            }
-
-            // =============================================================
-            // 2. TALISMAN DE NIVEAU & GEMMES D'HARMONIE DU JOUR SOUS L'ÎLOT
-            // =============================================================
-            let (rank_title, _) = rank_for(global_lvl.level);
-            let hud_rect = Rect::from_center_size(Pos2::new(cx, 434.0), Vec2::new(226.0, 22.0));
-            let hud_resp = ui.allocate_rect(hud_rect, Sense::click());
-            draw_pixel_plate(
-                ui.painter(),
-                hud_rect,
-                ZenPalette::INDIGO_PILL,
-                ZenPalette::SUMI_INK,
-                Some(ZenPalette::GOLD_LEAF),
-            );
-
-            let hud_label = format!("Nv.{} {}", global_lvl.level, rank_title);
-            draw_outlined_text(
-                ui.painter(),
-                Pos2::new(hud_rect.min.x + 10.0, hud_rect.center().y + 1.0),
-                Align2::LEFT_CENTER,
-                &hud_label,
-                10.5,
-                ZenPalette::GOLD_LEAF,
-            );
-
-            let bar_rect = Rect::from_min_size(
-                Pos2::new(hud_rect.min.x + 98.0, hud_rect.center().y - 2.0),
-                Vec2::new(72.0, 6.0),
-            );
-            draw_pixel_bar(
-                ui.painter(),
-                bar_rect,
-                global_lvl.ratio(),
-                ZenPalette::GOLD_LEAF,
-            );
-
-            // 3 petites gemmes de 5x5px pour l'Harmonie du Jour (Zazen, Éveil, Bushidō)
-            let gem_base_x = hud_rect.max.x - 42.0;
-            let gem_y = hud_rect.center().y - 2.0;
-            let gems = [
-                (self.progress.daily_breaths >= 3, ZenPalette::JADE_LIGHT),
-                (self.progress.daily_quizzes >= 1, ZenPalette::GOLD_LEAF),
-                (self.progress.daily_actions >= 1, ZenPalette::SAKURA),
-            ];
-            for (i, (done, col)) in gems.iter().enumerate() {
-                let gx = gem_base_x + i as f32 * 11.0;
-                let c = if *done {
-                    *col
-                } else {
-                    Color32::from_rgb(45, 50, 66)
-                };
-                fill_px(ui.painter(), gx, gem_y, 6.0, 6.0, ZenPalette::SUMI_INK);
-                fill_px(ui.painter(), gx + 1.0, gem_y + 1.0, 4.0, 4.0, c);
-            }
-
-            if hud_resp.clicked() {
-                self.show_control_panel = !self.show_control_panel;
-                if self.show_control_panel {
-                    self.menu_tab = MenuTab::Spirit;
-                }
-            }
-            if hud_resp.hovered() {
-                hud_resp.on_hover_text(format!(
-                    "Niveau {} ({}) — {} / {} XP\nHarmonie du Jour : Souffles {}/3 • Éveil {}/1 • Action {}/1\nClique pour ouvrir le Centre de Contrôle",
-                    global_lvl.level,
-                    rank_title,
-                    global_lvl.into,
-                    global_lvl.need,
-                    self.progress.daily_breaths.min(3),
-                    self.progress.daily_quizzes.min(1),
-                    self.progress.daily_actions.min(1),
-                ));
-            }
-
-            // Sablier actif ou mini-boutons discrets au survol quand tout est fermé
-            if let Some(ref t) = first_timer {
-                let rem = t.remaining().as_secs();
-                let timer_text = format!("Sablier {:02}:{:02} • {}", rem / 60, rem % 60, t.label);
-                draw_outlined_text(
-                    ui.painter(),
-                    Pos2::new(cx, 460.0),
-                    Align2::CENTER_CENTER,
-                    &timer_text,
-                    10.5,
-                    ZenPalette::JADE_LIGHT,
-                );
-            } else if !self.bubble_open && !self.show_control_panel && !self.in_zazen {
-                // Micro-barre d'accès rapide ultra-discrète sous le talisman
-                let quick_rect =
-                    Rect::from_center_size(Pos2::new(cx, 462.0), Vec2::new(204.0, 20.0));
-                let mut q_ui = ui.new_child(
-                    egui::UiBuilder::new()
-                        .max_rect(quick_rect)
-                        .layout(Layout::left_to_right(Align::Center)),
-                );
-                q_ui.spacing_mut().item_spacing.x = 6.0;
-                if zen_button(&mut q_ui, "Parler", BtnKind::Secondary, Vec2::new(64.0, 18.0))
-                    .clicked()
-                {
-                    self.bubble_open = true;
-                    self.focus_input_next = true;
-                }
-                if zen_button(&mut q_ui, "Zazen", BtnKind::Secondary, Vec2::new(64.0, 18.0))
-                    .clicked()
-                {
-                    self.enter_zazen(ctx, false);
-                }
-                if zen_button(&mut q_ui, "Menu", BtnKind::Secondary, Vec2::new(64.0, 18.0))
-                    .clicked()
-                {
-                    self.show_control_panel = true;
-                }
-            }
-
-            // =============================================================
-            // 3. ZONE JUSTE AU-DESSUS DE KAZE (ZAZEN / BULLE UNIQUE / MENU)
-            // =============================================================
-            if self.in_zazen {
-                // Plaque Zazen ancrée juste au-dessus du chapeau de Kaze
-                let plate_w = WIN_WIDTH - 44.0;
-                let plate_h = 158.0;
-                let plate_rect = Rect::from_min_size(
-                    Pos2::new((WIN_WIDTH - plate_w) * 0.5, hat_top_y - plate_h - 4.0),
-                    Vec2::new(plate_w, plate_h),
-                );
-                draw_pixel_plate(
-                    ui.painter(),
-                    plate_rect,
-                    ZenPalette::INDIGO_CARD,
-                    ZenPalette::JADE_LIGHT,
-                    Some(ZenPalette::JADE_LIGHT),
-                );
-
-                let inner = plate_rect.shrink2(Vec2::new(14.0, 10.0));
-                let mut zazen_ui = ui.new_child(
-                    egui::UiBuilder::new()
-                        .max_rect(inner)
-                        .layout(Layout::top_down(Align::Min)),
-                );
-
-                let med_secs = self.meditation_started_at.elapsed().as_secs_f32();
-                let (phase, breath_ratio, cycles) = BreathPhase::compute(med_secs);
-                let haiku = ZEN_HAIKUS[(cycles as usize) % ZEN_HAIKUS.len()];
-
-                if cycles > self.last_breath_count {
-                    self.last_breath_count = cycles;
-                    self.progress.daily_breaths += 1;
-                    self.grant_xp(XpPath::Zazen, 2, "Souffle Zen");
-                }
-
-                let (phase_txt, phase_col) = match phase {
-                    BreathPhase::Inhale => ("INSPIRATION LENTE (4s)", ZenPalette::JADE_LIGHT),
-                    BreathPhase::Hold => ("RÉTENTION SEREINE (3s)", ZenPalette::GOLD_LEAF),
-                    BreathPhase::Exhale => ("EXPIRATION PROFONDE (5s)", ZenPalette::SAKURA),
-                };
-
-                zazen_ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new("MÉDITATION ZAZEN")
-                            .size(11.0)
-                            .color(ZenPalette::JADE_LIGHT),
-                    );
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.label(RichText::new(phase_txt).size(11.0).color(phase_col));
-                    });
-                });
-                zazen_ui.add_space(6.0);
-
-                let (bar_rect, _) = zazen_ui
-                    .allocate_exact_size(Vec2::new(inner.width(), 8.0), Sense::hover());
-                draw_pixel_bar(ui.painter(), bar_rect, breath_ratio, phase.color());
-                zazen_ui.add_space(6.0);
-
-                let mins = (med_secs / 60.0).floor() as u32;
-                let secs = (med_secs % 60.0).floor() as u32;
-                zazen_ui.label(
-                    RichText::new(format!(
-                        "{} souffles (+{} XP) • Durée {:02}:{:02}",
-                        cycles,
-                        cycles * 2,
-                        mins,
-                        secs
-                    ))
-                    .size(11.5)
-                    .color(ZenPalette::WASHI_BG),
-                );
-                zazen_ui.add_space(2.0);
-                zazen_ui.label(RichText::new(haiku).size(10.5).color(ZenPalette::TEXT_DIM));
-                zazen_ui.add_space(8.0);
-
-                zazen_ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 8.0;
-                    if zen_button(
-                        ui,
-                        "Sortir de Zazen",
-                        BtnKind::Paper,
-                        Vec2::new(124.0, 22.0),
-                    )
-                    .clicked()
-                    {
-                        self.leave_zazen(ctx);
-                    }
-                    let corner_lbl = if self.meditation_in_corner {
-                        "Recentrer"
-                    } else {
-                        "Coin écran"
+                } else if pet_resp.clicked() {
+                    let next_mood = match self.animator.current_mood {
+                        PetMood::Idle => PetMood::Attack,
+                        PetMood::Attack => PetMood::Jump,
+                        _ => PetMood::Special,
                     };
-                    if zen_button(ui, corner_lbl, BtnKind::Secondary, Vec2::new(96.0, 22.0))
-                        .clicked()
-                    {
-                        self.toggle_meditation_corner(ctx);
+                    self.animator
+                        .set_mood(next_mood, Some(Duration::from_millis(1100)));
+                    if self.last_pat_xp.elapsed() >= Duration::from_secs(45) {
+                        self.last_pat_xp = Instant::now();
+                        self.grant_xp(XpPath::Bushido, 1, "Salut au sabre");
                     }
-                });
-            } else if self.show_control_panel {
-                // =============================================================
-                // CENTRE DE CONTRÔLE (/menu) : VRAIE PETITE FENÊTRE AU-DESSUS DE KAZE
-                // =============================================================
-                let panel_w = WIN_WIDTH - 16.0;
-                let panel_h = 300.0;
-                let panel_rect = Rect::from_min_size(
-                    Pos2::new((WIN_WIDTH - panel_w) * 0.5, hat_top_y - panel_h - 2.0),
-                    Vec2::new(panel_w, panel_h),
-                );
-                draw_pixel_plate(
-                    ui.painter(),
-                    panel_rect,
-                    ZenPalette::INDIGO_CARD,
-                    self.menu_tab.accent(),
-                    Some(self.menu_tab.accent()),
-                );
+                }
 
-                let inner = panel_rect.shrink2(Vec2::new(12.0, 10.0));
-                let mut p_ui = ui.new_child(
-                    egui::UiBuilder::new()
-                        .max_rect(inner)
-                        .layout(Layout::top_down(Align::Min)),
-                );
-
-                // Barre de titre de la fenêtre Centre de Contrôle (glissable)
-                let title_res = p_ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new("KAZE — CENTRE DE CONTRÔLE")
-                            .size(11.5)
-                            .color(ZenPalette::GOLD_LEAF),
-                    );
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if zen_button(ui, "Fermer x", BtnKind::Danger, Vec2::new(62.0, 18.0))
-                            .clicked()
-                        {
-                            self.show_control_panel = false;
-                        }
-                        if zen_button(ui, "Bulle", BtnKind::Secondary, Vec2::new(48.0, 18.0))
-                            .clicked()
-                        {
-                            self.show_control_panel = false;
-                            self.bubble_open = true;
-                            self.focus_input_next = true;
-                        }
-                    });
-                });
-                if title_res.response.drag_started() {
+                if pet_resp.drag_started() {
                     ctx.send_viewport_cmd(ViewportCommand::StartDrag);
                 }
-                p_ui.add_space(4.0);
 
-                // Barre des 6 onglets parfaitement calibrée
-                p_ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
-                    let tab_w = (inner.width() - 20.0) / 6.0;
-                    for tab in MenuTab::ALL {
-                        let sel = self.menu_tab == tab;
-                        let kind = if sel {
-                            BtnKind::Selected(tab.accent())
-                        } else {
-                            BtnKind::Secondary
-                        };
-                        if zen_button(ui, tab.label(), kind, Vec2::new(tab_w, 22.0)).clicked() {
-                            self.menu_tab = tab;
-                            if tab == MenuTab::Eveil
-                                && self.quiz.question.is_none()
-                                && !self.quiz.loading
-                            {
-                                self.request_new_quiz_question(ctx);
-                            }
-                        }
-                    }
-                });
-                p_ui.add_space(6.0);
-
-                // Contenu de l'onglet actif
-                match self.menu_tab {
-                    MenuTab::Eveil => {
-                        let p_eveil = self.progress.path_level(XpPath::Eveil);
-                        p_ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new(format!(
-                                    "Voie de l'Éveil Nv.{} ({} XP) • Série : {} (Record : {})",
-                                    p_eveil.level,
-                                    self.progress.eveil_xp,
-                                    self.quiz.streak,
-                                    self.progress.best_streak
-                                ))
-                                .size(10.5)
-                                .color(ZenPalette::GOLD_LEAF),
-                            );
-                        });
-                        p_ui.add_space(3.0);
-
-                        p_ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 4.0;
-                            let edit = egui::TextEdit::singleline(&mut self.quiz.topic_input)
-                                .hint_text("Sujet d'étude...")
-                                .desired_width(155.0)
-                                .font(FontId::new(11.0, FontFamily::Proportional));
-                            ui.add(edit);
-
-                            for &(lbl, topic) in &[
-                                ("Zen", "Philosophie Zen & Samouraï"),
-                                ("Rust", "Programmation Rust & Systèmes"),
-                                ("Japon", "Histoire du Japon féodal"),
-                                ("Linux", "Linux & Cybersécurité"),
-                            ] {
-                                if zen_button(ui, lbl, BtnKind::Secondary, Vec2::new(42.0, 20.0))
-                                    .clicked()
-                                {
-                                    self.quiz.topic_input = topic.to_string();
-                                    self.request_new_quiz_question(ctx);
-                                }
-                            }
-                            if zen_button(ui, "Nouveau", BtnKind::Primary, Vec2::new(58.0, 20.0))
-                                .clicked()
-                            {
-                                self.request_new_quiz_question(ctx);
-                            }
-                        });
-                        p_ui.add_space(5.0);
-
-                        if self.quiz.loading {
-                            p_ui.add_space(24.0);
-                            p_ui.label(
-                                RichText::new("Le Sensei prépare une énigme sur ce sujet…")
-                                    .size(11.5)
-                                    .color(ZenPalette::GOLD_LEAF),
-                            );
-                        } else if let Some(err) = self.quiz.error.clone() {
-                            p_ui.label(
-                                RichText::new(format!("Erreur : {}", err))
-                                    .size(11.0)
-                                    .color(ZenPalette::SAKURA),
-                            );
-                            if zen_button(
-                                &mut p_ui,
-                                "Réessayer",
-                                BtnKind::Primary,
-                                Vec2::new(90.0, 22.0),
-                            )
-                            .clicked()
-                            {
-                                self.request_new_quiz_question(ctx);
-                            }
-                        } else if let Some(q) = self.quiz.question.clone() {
-                            p_ui.label(
-                                RichText::new(&q.question)
-                                    .size(11.5)
-                                    .color(ZenPalette::TEXT_LIGHT),
-                            );
-                            p_ui.add_space(4.0);
-
-                            let answered = self.quiz.selected_option.is_some();
-                            let mut chosen_idx = None;
-                            let btn_w = (inner.width() - 8.0) * 0.5;
-
-                            for pair in [0usize, 1, 2, 3].chunks(2) {
-                                p_ui.horizontal(|ui| {
-                                    ui.spacing_mut().item_spacing.x = 6.0;
-                                    for &idx in pair {
-                                        let opt =
-                                            q.options.get(idx).map(|s| s.as_str()).unwrap_or("");
-                                        let prefix = match idx {
-                                            0 => "A",
-                                            1 => "B",
-                                            2 => "C",
-                                            _ => "D",
-                                        };
-                                        let label = format!("{}. {}", prefix, opt);
-                                        let kind = if let Some(sel) = self.quiz.selected_option {
-                                            if idx == q.correct_idx {
-                                                BtnKind::Success
-                                            } else if idx == sel {
-                                                BtnKind::Danger
-                                            } else {
-                                                BtnKind::Secondary
-                                            }
-                                        } else {
-                                            BtnKind::Secondary
-                                        };
-                                        if zen_button(ui, &label, kind, Vec2::new(btn_w, 24.0))
-                                            .clicked()
-                                            && !answered
-                                        {
-                                            chosen_idx = Some(idx);
-                                        }
-                                    }
-                                });
-                                p_ui.add_space(3.0);
-                            }
-
-                            if let Some(idx) = chosen_idx {
-                                self.answer_quiz(idx);
-                            }
-
-                            if let Some(correct) = self.quiz.was_correct {
-                                let (tag, col) = if correct {
-                                    ("Exact ! (+XP Éveil)", ZenPalette::JADE_LIGHT)
-                                } else {
-                                    ("Raté ! (+3 XP Persévérance)", ZenPalette::SAKURA)
-                                };
-                                p_ui.horizontal(|ui| {
-                                    ui.label(RichText::new(tag).size(11.0).color(col));
-                                    if zen_button(
-                                        ui,
-                                        "Question suivante >",
-                                        BtnKind::Primary,
-                                        Vec2::new(125.0, 20.0),
-                                    )
-                                    .clicked()
-                                    {
-                                        self.request_new_quiz_question(ctx);
-                                    }
-                                });
-                                p_ui.label(
-                                    RichText::new(&q.explanation)
-                                        .size(10.5)
-                                        .color(ZenPalette::TEXT_DIM),
-                                );
-                            }
-                        } else {
-                            p_ui.label(
-                                RichText::new("Choisis un sujet et lance une question pour cultiver la Voie de l'Éveil.")
-                                    .size(11.0)
-                                    .color(ZenPalette::TEXT_DIM),
-                            );
-                        }
-                    }
-
-                    MenuTab::Zazen => {
-                        let p_zazen = self.progress.path_level(XpPath::Zazen);
-                        p_ui.label(
-                            RichText::new(format!(
-                                "Voie du Zazen Nv.{} ({} XP) • Total médité : {} min ({} sessions)",
-                                p_zazen.level,
-                                self.progress.zazen_xp,
-                                self.progress.meditation_secs / 60,
-                                self.progress.meditation_sessions
-                            ))
-                            .size(11.0)
-                            .color(ZenPalette::JADE_LIGHT),
-                        );
-                        p_ui.add_space(6.0);
-                        p_ui.label(
-                            RichText::new(
-                                "La méditation Zazen apaise le mental grâce au rythme respiratoire 4-3-5 :\n\
-                                • 4s d'inspiration calme • 3s de rétention • 5s d'expiration relâchée.\n\
-                                • Chaque cycle complet accorde +2 XP Zazen et fait fleurir votre îlot.",
-                            )
-                            .size(11.0)
-                            .color(ZenPalette::TEXT_LIGHT),
-                        );
-                        p_ui.add_space(10.0);
-
-                        p_ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 8.0;
-                            if zen_button(
-                                ui,
-                                "Méditer ici",
-                                BtnKind::Primary,
-                                Vec2::new(125.0, 26.0),
-                            )
-                            .clicked()
-                            {
-                                self.enter_zazen(ctx, false);
-                            }
-                            if zen_button(
-                                ui,
-                                "Méditer dans le coin",
-                                BtnKind::Secondary,
-                                Vec2::new(145.0, 26.0),
-                            )
-                            .clicked()
-                            {
-                                self.enter_zazen(ctx, true);
-                            }
-                            let roam_lbl = if self.roaming_enabled {
-                                "Balade : ON"
-                            } else {
-                                "Balade : OFF"
-                            };
-                            if zen_button(ui, roam_lbl, BtnKind::Paper, Vec2::new(95.0, 26.0))
-                                .clicked()
-                            {
-                                self.roaming_enabled = !self.roaming_enabled;
-                            }
-                        });
-                    }
-
-                    MenuTab::Actions => {
-                        p_ui.label(
-                            RichText::new("Rituels de Concentration & Actions Système")
-                                .size(11.0)
-                                .color(ZenPalette::CYAN_SPIRIT),
-                        );
-                        p_ui.add_space(4.0);
-
-                        let groups: &[(&str, &[(&str, &str)])] = &[
-                            (
-                                "Rituels Zen",
-                                &[
-                                    ("Pomodoro 25m", "/pomo 25"),
-                                    ("Sablier Thé 3m", "/timer 3m Thé"),
-                                    ("Pause 5m", "/timer 5m Pause"),
-                                    ("Voir Sabliers", "/timers"),
-                                ],
-                            ),
-                            (
-                                "Système",
-                                &[
-                                    ("Bilan OS", "/sys"),
-                                    ("Top RAM", "/top"),
-                                    ("Réseau & IP", "/net"),
-                                    ("Batterie", "/bat"),
-                                ],
-                            ),
-                            (
-                                "Audio & Média",
-                                &[
-                                    ("Volume -10%", "/vol -10"),
-                                    ("Volume +10%", "/vol +10"),
-                                    ("Muet", "/vol mute"),
-                                    ("Play / Pause", "/media toggle"),
-                                ],
-                            ),
-                            (
-                                "Bureau",
-                                &[
-                                    ("Capture écran", "/shot"),
-                                    ("Dossier ~", "/ls"),
-                                    ("Terminal", "/open terminal"),
-                                    ("Presse-papiers", "/clip"),
-                                ],
-                            ),
-                        ];
-
-                        let btn_w = (inner.width() - 18.0) / 4.0;
-                        let mut triggered_cmd: Option<String> = None;
-
-                        for (group_title, items) in groups {
-                            p_ui.label(
-                                RichText::new(*group_title)
-                                    .size(10.0)
-                                    .color(ZenPalette::GOLD_LEAF),
-                            );
-                            p_ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = 6.0;
-                                for (lbl, cmd) in *items {
-                                    if zen_button(
-                                        ui,
-                                        lbl,
-                                        BtnKind::Secondary,
-                                        Vec2::new(btn_w, 22.0),
-                                    )
-                                    .clicked()
-                                    {
-                                        triggered_cmd = Some((*cmd).to_string());
-                                    }
-                                }
-                            });
-                            p_ui.add_space(3.0);
-                        }
-
-                        if let Some(cmd) = triggered_cmd {
-                            self.show_control_panel = false;
-                            self.submit_input(ctx, cmd);
-                        }
-                    }
-
-                    MenuTab::History => {
-                        p_ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new(format!(
-                                    "Historique ({} messages)",
-                                    self.history.len()
-                                ))
-                                .size(11.0)
-                                .color(ZenPalette::SAKURA),
-                            );
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                if zen_button(
-                                    ui,
-                                    "Effacer",
-                                    BtnKind::Danger,
-                                    Vec2::new(68.0, 20.0),
-                                )
-                                .clicked()
-                                {
-                                    self.history.clear();
-                                }
-                                if zen_button(
-                                    ui,
-                                    "Exporter .md",
-                                    BtnKind::Paper,
-                                    Vec2::new(92.0, 20.0),
-                                )
-                                .clicked()
-                                {
-                                    self.export_current_response_md("historique_complet");
-                                }
-                            });
-                        });
-                        p_ui.add_space(3.0);
-
-                        p_ui.label(
-                            RichText::new(kde::get_compact_context())
-                                .size(9.5)
-                                .color(ZenPalette::TEXT_DIM),
-                        );
-                        p_ui.add_space(4.0);
-
-                        let _ = ScrollArea::vertical()
-                            .id_salt("panel_history_scroll")
-                            .max_height(165.0)
-                            .stick_to_bottom(true)
-                            .show(&mut p_ui, |ui| {
-                                if self.history.is_empty() {
-                                    ui.label(
-                                        RichText::new("Aucun échange enregistré dans cette session.")
-                                            .size(11.0)
-                                            .color(ZenPalette::TEXT_DIM),
-                                    );
-                                } else {
-                                    for msg in &self.history {
-                                        let (who, col) = if msg.role == "user" {
-                                            ("Vous", ZenPalette::GOLD_LEAF)
-                                        } else {
-                                            ("Kaze", ZenPalette::VERMILION)
-                                        };
-                                        ui.horizontal_wrapped(|ui| {
-                                            ui.label(
-                                                RichText::new(format!("{} : ", who))
-                                                    .size(10.5)
-                                                    .color(col),
-                                            );
-                                            ui.label(
-                                                RichText::new(&msg.content)
-                                                    .size(10.5)
-                                                    .color(ZenPalette::TEXT_LIGHT),
-                                            );
-                                        });
-                                        ui.add_space(2.0);
-                                    }
-                                }
-                            });
-                    }
-
-                    MenuTab::Permissions => {
-                        p_ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new("Exécution Automatique vs Confirmation Humaine")
-                                    .size(11.0)
-                                    .color(ZenPalette::GOLD_LEAF),
-                            );
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                if zen_button(
-                                    ui,
-                                    "Tout demander",
-                                    BtnKind::Secondary,
-                                    Vec2::new(92.0, 18.0),
-                                )
-                                .clicked()
-                                {
-                                    self.progress.permissions.set_strict_all();
-                                    self.progress.save();
-                                }
-                                if zen_button(
-                                    ui,
-                                    " Zen (Défaut)",
-                                    BtnKind::Paper,
-                                    Vec2::new(86.0, 18.0),
-                                )
-                                .clicked()
-                                {
-                                    self.progress.permissions.set_zen_balanced();
-                                    self.progress.save();
-                                }
-                            });
-                        });
-                        p_ui.add_space(4.0);
-
-                        let mut changed = false;
-                        let mut perm_row =
-                            |ui: &mut egui::Ui, val: &mut bool, label: &str, warn: bool| {
-                                ui.horizontal(|ui| {
-                                    let (txt, kind) = if *val {
-                                        (
-                                            "Auto",
-                                            if warn {
-                                                BtnKind::Danger
-                                            } else {
-                                                BtnKind::Success
-                                            },
-                                        )
-                                    } else {
-                                        ("Demander", BtnKind::Secondary)
-                                    };
-                                    if zen_button(ui, txt, kind, Vec2::new(74.0, 19.0)).clicked() {
-                                        *val = !*val;
-                                        changed = true;
-                                    }
-                                    ui.label(
-                                        RichText::new(label)
-                                            .size(10.5)
-                                            .color(ZenPalette::TEXT_LIGHT),
-                                    );
-                                });
-                            };
-
-                        perm_row(
-                            &mut p_ui,
-                            &mut self.progress.permissions.auto_allow_system_info,
-                            "Bilans Système (CPU, RAM, Réseau, Batterie)",
-                            false,
-                        );
-                        perm_row(
-                            &mut p_ui,
-                            &mut self.progress.permissions.auto_allow_media_audio,
-                            "Contrôle Audio, Média & Captures d'écran",
-                            false,
-                        );
-                        perm_row(
-                            &mut p_ui,
-                            &mut self.progress.permissions.auto_allow_timers,
-                            "Minuteurs & Sessions Pomodoro Zen",
-                            false,
-                        );
-                        perm_row(
-                            &mut p_ui,
-                            &mut self.progress.permissions.auto_allow_read_notes_mem,
-                            "Lecture des Notes & Mémoire long-terme",
-                            false,
-                        );
-                        perm_row(
-                            &mut p_ui,
-                            &mut self.progress.permissions.auto_allow_read_files,
-                            "Exploration & Lecture de fichiers (~)",
-                            false,
-                        );
-                        perm_row(
-                            &mut p_ui,
-                            &mut self.progress.permissions.auto_allow_apps_url,
-                            "Ouverture d'applications & Liens web",
-                            false,
-                        );
-                        perm_row(
-                            &mut p_ui,
-                            &mut self.progress.permissions.auto_allow_shell,
-                            "Commandes Shell libres (Sensible)",
-                            true,
-                        );
-
-                        if changed {
-                            self.progress.save();
-                        }
-                    }
-
-                    MenuTab::Spirit => {
-                        // Les 3 Voies + Harmonie du Jour + Modèle IA + Mémoire
-                        let g = self.progress.global_level();
-                        let (rk, rk_desc) = rank_for(g.level);
-                        let next_str = next_rank(g.level)
-                            .map(|(nl, nr)| format!("Prochain rang : {} (Nv.{})", nr, nl))
-                            .unwrap_or_else(|| "Rang ultime Satori atteint".into());
-
-                        p_ui.label(
-                            RichText::new(format!(
-                                "Niveau {} • {} — « {} » ({})",
-                                g.level, rk, rk_desc, next_str
-                            ))
-                            .size(10.5)
-                            .color(ZenPalette::GOLD_LEAF),
-                        );
-                        p_ui.add_space(4.0);
-
-                        for path in XpPath::ALL {
-                            let pl = self.progress.path_level(path);
-                            p_ui.horizontal(|ui| {
-                                ui.label(
-                                    RichText::new(format!(
-                                        "{:<8} Nv.{:<2}",
-                                        path.label(),
-                                        pl.level
-                                    ))
-                                    .size(10.5)
-                                    .color(path.color()),
-                                );
-                                let (b_rect, _) = ui
-                                    .allocate_exact_size(Vec2::new(150.0, 7.0), Sense::hover());
-                                draw_pixel_bar(ui.painter(), b_rect, pl.ratio(), path.color());
-                                ui.label(
-                                    RichText::new(format!("{}/{} XP", pl.into, pl.need))
-                                        .size(9.5)
-                                        .color(ZenPalette::TEXT_DIM),
-                                );
-                            });
-                        }
-
-                        p_ui.add_space(4.0);
-                        p_ui.label(
-                            RichText::new(format!(
-                                "Harmonie du Jour : Souffles {}/3 • Éveil {}/1 • Action {}/1 • Série {} j",
-                                self.progress.daily_breaths.min(3),
-                                self.progress.daily_quizzes.min(1),
-                                self.progress.daily_actions.min(1),
-                                self.progress.visit_streak
-                            ))
-                            .size(10.0)
-                            .color(ZenPalette::JADE_LIGHT),
-                        );
-                        p_ui.add_space(4.0);
-
-                        p_ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new(format!("Modèle IA : {}", self.active_model))
-                                    .size(10.5)
-                                    .color(ZenPalette::CYAN_SPIRIT),
-                            );
-                            if zen_button(
-                                ui,
-                                "Changer de modèle",
-                                BtnKind::Secondary,
-                                Vec2::new(118.0, 19.0),
-                            )
-                            .clicked()
-                            {
-                                self.cycle_model();
-                            }
-                        });
-                        p_ui.add_space(4.0);
-
-                        p_ui.horizontal(|ui| {
-                            let edit =
-                                egui::TextEdit::singleline(&mut self.new_memory_fact_input)
-                                    .hint_text("Confier un souvenir durable à Kaze...")
-                                    .desired_width(250.0)
-                                    .font(FontId::new(11.0, FontFamily::Proportional));
-                            ui.add(edit);
-                            if zen_button(
-                                ui,
-                                "+ Mémoriser",
-                                BtnKind::Primary,
-                                Vec2::new(82.0, 20.0),
-                            )
-                            .clicked()
-                            {
-                                let fact = std::mem::take(&mut self.new_memory_fact_input);
-                                if !fact.trim().is_empty() {
-                                    let _ = awareness::remember_fact(&fact);
-                                }
-                            }
-                        });
-
-                        let facts = awareness::load_memory().facts;
-                        let _ = ScrollArea::vertical()
-                            .id_salt("spirit_mem_scroll")
-                            .max_height(56.0)
-                            .show(&mut p_ui, |ui| {
-                                if facts.is_empty() {
-                                    ui.label(
-                                        RichText::new("Mémoire long-terme vierge.")
-                                            .size(10.0)
-                                            .color(ZenPalette::TEXT_DIM),
-                                    );
-                                } else {
-                                    for f in &facts {
-                                        ui.label(
-                                            RichText::new(format!("• {}", f))
-                                                .size(10.0)
-                                                .color(ZenPalette::TEXT_LIGHT),
-                                        );
-                                    }
-                                }
-                            });
-                    }
-                }
-            } else if self.bubble_anim > 0.02 {
-                // =============================================================
-                // LA BULLE UNIQUE TOUT-EN-UN (ANCRÉE JUSTE AU-DESSUS DU CHAPEAU DE KAZE)
-                // =============================================================
-                let anim = self.bubble_anim;
-                let bubble_w = WIN_WIDTH - 24.0;
-                let bubble_h = (self.bubble_h_anim * anim).max(64.0);
-                // Le bas de la queue de la bulle touche exactement le sommet du chapeau de Kaze !
-                let bubble_top_y = (hat_top_y - bubble_h).max(6.0);
-                let bubble_rect = Rect::from_min_size(
-                    Pos2::new((WIN_WIDTH - bubble_w) * 0.5, bubble_top_y),
-                    Vec2::new(bubble_w, bubble_h),
+                // 2. Talisman d'EXP, Niveau, Titre & Gemmes d'Harmonie sous l'îlot
+                let (rank_title, _) = rank_for(global_lvl.level);
+                let short_title = self.progress.short_display_title();
+                let hud_rect =
+                    Rect::from_center_size(Pos2::new(cx, 434.0), Vec2::new(264.0, 32.0));
+                let hud_resp = ui.allocate_rect(hud_rect, Sense::click());
+                draw_pixel_plate(
+                    ui.painter(),
+                    hud_rect,
+                    ZenPalette::INDIGO_PILL,
+                    ZenPalette::SUMI_INK,
+                    Some(ZenPalette::GOLD_LEAF),
                 );
-                draw_washi_speech_bubble(ui.painter(), bubble_rect, mood_accent, anim);
 
-                if anim > 0.65 {
-                    let box_rect = Rect::from_min_size(
-                        bubble_rect.min,
-                        Vec2::new(bubble_rect.width(), bubble_rect.height() - 15.0),
+                let hud_label = format!("Nv.{} • {}", global_lvl.level, short_title);
+                draw_outlined_text(
+                    ui.painter(),
+                    Pos2::new(hud_rect.min.x + 10.0, hud_rect.min.y + 10.0),
+                    Align2::LEFT_CENTER,
+                    &hud_label,
+                    10.5,
+                    ZenPalette::GOLD_LEAF,
+                );
+
+                let xp_txt = format!("{}%", global_lvl.percent());
+                draw_outlined_text(
+                    ui.painter(),
+                    Pos2::new(hud_rect.max.x - 10.0, hud_rect.min.y + 10.0),
+                    Align2::RIGHT_CENTER,
+                    &xp_txt,
+                    10.0,
+                    ZenPalette::TEXT_LIGHT,
+                );
+
+                let bar_rect = Rect::from_min_size(
+                    Pos2::new(hud_rect.min.x + 10.0, hud_rect.min.y + 19.0),
+                    Vec2::new(204.0, 7.0),
+                );
+                draw_pixel_bar(
+                    ui.painter(),
+                    bar_rect,
+                    global_lvl.ratio(),
+                    ZenPalette::GOLD_LEAF,
+                );
+
+                let gem_base_x = hud_rect.max.x - 42.0;
+                let gem_y = hud_rect.min.y + 19.0;
+                let gems = [
+                    (self.progress.daily_breaths >= 3, ZenPalette::JADE_LIGHT),
+                    (self.progress.daily_quizzes >= 1, ZenPalette::GOLD_LEAF),
+                    (self.progress.daily_actions >= 1, ZenPalette::SAKURA),
+                ];
+                for (i, (done, col)) in gems.iter().enumerate() {
+                    let gx = gem_base_x + i as f32 * 11.0;
+                    let c = if *done {
+                        *col
+                    } else {
+                        Color32::from_rgb(45, 50, 66)
+                    };
+                    fill_px(ui.painter(), gx, gem_y, 7.0, 7.0, ZenPalette::SUMI_INK);
+                    fill_px(ui.painter(), gx + 1.0, gem_y + 1.0, 5.0, 5.0, c);
+                }
+
+                if hud_resp.clicked() {
+                    self.open_dojo_window(ctx, MenuTab::Progression);
+                }
+                if hud_resp.hovered() {
+                    hud_resp.on_hover_text(format!(
+                        "Niveau {} • {}\nRang : {}\nExpérience : {} / {} XP ({}% • Total {} XP)\nHarmonie du Jour : Souffles {}/3 • Éveil {}/1 • Action {}/1\nClique pour ouvrir Voies & Titres d'Honneur",
+                        global_lvl.level,
+                        self.progress.display_title(),
+                        rank_title,
+                        global_lvl.into,
+                        global_lvl.need,
+                        global_lvl.percent(),
+                        self.progress.total_xp(),
+                        self.progress.daily_breaths.min(3),
+                        self.progress.daily_quizzes.min(1),
+                        self.progress.daily_actions.min(1),
+                    ));
+                }
+
+                if let Some(ref t) = first_timer {
+                    let rem = t.remaining().as_secs();
+                    let timer_text = format!("Sablier {:02}:{:02} • {}", rem / 60, rem % 60, t.label);
+                    draw_outlined_text(
+                        ui.painter(),
+                        Pos2::new(cx, 464.0),
+                        Align2::CENTER_CENTER,
+                        &timer_text,
+                        10.5,
+                        ZenPalette::JADE_LIGHT,
                     );
-                    let content_rect = box_rect.shrink2(Vec2::new(14.0, 8.0));
-                    let mut bubble_ui = ui.new_child(
+                } else if !self.bubble_open && !self.in_zazen {
+                    let quick_rect =
+                        Rect::from_center_size(Pos2::new(cx, 466.0), Vec2::new(264.0, 20.0));
+                    let mut q_ui = ui.new_child(
                         egui::UiBuilder::new()
-                            .max_rect(content_rect)
-                            .layout(Layout::top_down(Align::Min)),
-                    );
-
-                    // 1. En-tête de la bulle Washi
-                    let header_res = bubble_ui.horizontal(|ui| {
-                        ui.add_space(18.0);
-                        let title = if self.pending_confirmation.is_some() {
-                            "CONFIRMATION"
-                        } else {
-                            self.animator.current_mood.label()
-                        };
-                        ui.label(
-                            RichText::new(format!("KAZE • {}", title))
-                                .size(11.0)
-                                .color(ZenPalette::VERMILION),
-                        );
-
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            ui.spacing_mut().item_spacing.x = 4.0;
-                            if ui
-                                .add(
-                                    egui::Button::new(
-                                        RichText::new("x")
-                                            .size(12.0)
-                                            .color(ZenPalette::SUMI_MUTED),
-                                    )
-                                    .frame(false),
-                                )
-                                .clicked()
-                            {
-                                self.bubble_open = false;
-                            }
-                            if zen_button(ui, "Menu", BtnKind::Paper, Vec2::new(42.0, 18.0))
-                                .clicked()
-                            {
-                                self.show_control_panel = true;
-                            }
-                            if let Some(ref md_path) = self.last_exported_md.clone() {
-                                if zen_button(ui, "Ouvrir", BtnKind::Paper, Vec2::new(44.0, 18.0))
-                                    .clicked()
-                                {
-                                    tasks::open_file_external(md_path);
-                                }
-                            }
-                            if zen_button(ui, ".md", BtnKind::Paper, Vec2::new(32.0, 18.0))
-                                .clicked()
-                            {
-                                self.export_current_response_md("");
-                            }
-                            if zen_button(ui, "Copier", BtnKind::Paper, Vec2::new(46.0, 18.0))
-                                .clicked()
-                            {
-                                self.copy_current_response();
-                            }
-                            let (mode_lbl, mode_kind) = match self.bubble_view_mode {
-                                BubbleViewMode::Zen => {
-                                    ("Zen", BtnKind::Selected(ZenPalette::VERMILION))
-                                }
-                                BubbleViewMode::Echange => {
-                                    ("Échange", BtnKind::Selected(ZenPalette::CYAN_SPIRIT))
-                                }
-                            };
-                            if zen_button(ui, mode_lbl, mode_kind, Vec2::new(52.0, 18.0)).clicked()
-                            {
-                                self.bubble_view_mode = match self.bubble_view_mode {
-                                    BubbleViewMode::Zen => BubbleViewMode::Echange,
-                                    BubbleViewMode::Echange => BubbleViewMode::Zen,
-                                };
-                            }
-                        });
-                    });
-                    if header_res.response.drag_started() {
-                        ctx.send_viewport_cmd(ViewportCommand::StartDrag);
-                    }
-                    bubble_ui.add_space(3.0);
-
-                    // Hauteur disponible pour le corps au-dessus de la barre de saisie (32px)
-                    let body_h = (content_rect.height() - 62.0).max(42.0);
-
-                    // 2. Corps de la bulle (Mode Zen vs Mode Échange)
-                    match self.bubble_view_mode {
-                        BubbleViewMode::Zen => {
-                            if let Some(ref prompt) = self.last_user_prompt {
-                                bubble_ui.label(
-                                    RichText::new(format!("« {} »", prompt))
-                                        .size(10.5)
-                                        .color(ZenPalette::SUMI_MUTED),
-                                );
-                            }
-
-                            let displayed: String =
-                                self.full_text.chars().take(self.revealed_chars).collect();
-                            let scroll_h = if self.pending_confirmation.is_some() {
-                                (body_h - 36.0).max(32.0)
-                            } else {
-                                (body_h - if self.last_user_prompt.is_some() { 16.0 } else { 0.0 })
-                                    .max(36.0)
-                            };
-
-                            let _ = ScrollArea::vertical()
-                                .id_salt("zen_bubble_scroll")
-                                .max_height(scroll_h)
-                                .auto_shrink([false, false])
-                                .show(&mut bubble_ui, |ui| {
-                                    let lbl = ui.add(
-                                        egui::Label::new(
-                                            RichText::new(&displayed)
-                                                .size(12.5)
-                                                .color(ZenPalette::SUMI_INK),
-                                        )
-                                        .sense(Sense::click()),
-                                    );
-                                    if lbl.clicked() && self.revealed_chars < total_chars {
-                                        self.revealed_chars = total_chars;
-                                    }
-                                });
-
-                            if self.pending_confirmation.is_some() {
-                                bubble_ui.add_space(2.0);
-                                bubble_ui.horizontal(|ui| {
-                                    ui.spacing_mut().item_spacing.x = 6.0;
-                                    if zen_button(
-                                        ui,
-                                        "Accepter (Entrée)",
-                                        BtnKind::Success,
-                                        Vec2::new(155.0, 21.0),
-                                    )
-                                    .clicked()
-                                    {
-                                        self.confirm_pending_action(ctx);
-                                    }
-                                    if zen_button(
-                                        ui,
-                                        "Refuser (Échap)",
-                                        BtnKind::Danger,
-                                        Vec2::new(155.0, 21.0),
-                                    )
-                                    .clicked()
-                                    {
-                                        self.reject_pending_action(ctx);
-                                    }
-                                });
-                            }
-                        }
-
-                        BubbleViewMode::Echange => {
-                            let _ = ScrollArea::vertical()
-                                .id_salt("echange_bubble_scroll")
-                                .max_height(body_h)
-                                .auto_shrink([false, false])
-                                .stick_to_bottom(true)
-                                .show(&mut bubble_ui, |ui| {
-                                    if self.history.is_empty() {
-                                        ui.label(
-                                            RichText::new(&self.full_text)
-                                                .size(12.0)
-                                                .color(ZenPalette::SUMI_INK),
-                                        );
-                                    } else {
-                                        for msg in &self.history {
-                                            if msg.role == "user" {
-                                                ui.horizontal_wrapped(|ui| {
-                                                    ui.label(
-                                                        RichText::new("Vous : ")
-                                                            .size(10.5)
-                                                            .color(ZenPalette::SUMI_MUTED),
-                                                    );
-                                                    ui.label(
-                                                        RichText::new(&msg.content)
-                                                            .size(11.5)
-                                                            .color(ZenPalette::SUMI_INK),
-                                                    );
-                                                });
-                                            } else {
-                                                ui.horizontal_wrapped(|ui| {
-                                                    ui.label(
-                                                        RichText::new("Kaze : ")
-                                                            .size(10.5)
-                                                            .color(ZenPalette::VERMILION),
-                                                    );
-                                                    ui.label(
-                                                        RichText::new(&msg.content)
-                                                            .size(11.5)
-                                                            .color(ZenPalette::SUMI_INK),
-                                                    );
-                                                });
-                                            }
-                                            ui.add_space(2.0);
-                                        }
-                                    }
-
-                                    if self.is_loading {
-                                        ui.label(
-                                            RichText::new("Kaze médite sur ta demande…")
-                                                .size(11.0)
-                                                .color(ZenPalette::VERMILION),
-                                        );
-                                    }
-
-                                    if self.pending_confirmation.is_some() {
-                                        ui.add_space(2.0);
-                                        ui.horizontal(|ui| {
-                                            ui.spacing_mut().item_spacing.x = 6.0;
-                                            if zen_button(
-                                                ui,
-                                                "Accepter",
-                                                BtnKind::Success,
-                                                Vec2::new(110.0, 20.0),
-                                            )
-                                            .clicked()
-                                            {
-                                                self.confirm_pending_action(ctx);
-                                            }
-                                            if zen_button(
-                                                ui,
-                                                "Refuser",
-                                                BtnKind::Danger,
-                                                Vec2::new(110.0, 20.0),
-                                            )
-                                            .clicked()
-                                            {
-                                                self.reject_pending_action(ctx);
-                                            }
-                                        });
-                                    }
-                                });
-                        }
-                    }
-
-                    if let Some((ref msg, _)) = self.bubble_feedback {
-                        bubble_ui.label(RichText::new(msg).size(10.0).color(ZenPalette::JADE));
-                    }
-
-                    // 3. Pied de la bulle : Saisie sur Parchemin Washi (sans rectangle noir !)
-                    let input_row_rect = Rect::from_min_size(
-                        Pos2::new(content_rect.min.x, content_rect.max.y - 26.0),
-                        Vec2::new(content_rect.width(), 24.0),
-                    );
-                    let box_w = input_row_rect.width() - 34.0;
-                    let text_box_rect =
-                        Rect::from_min_size(input_row_rect.min, Vec2::new(box_w, 24.0));
-                    draw_washi_input_box(ui.painter(), text_box_rect, true);
-
-                    let mut in_ui = ui.new_child(
-                        egui::UiBuilder::new()
-                            .max_rect(input_row_rect)
+                            .max_rect(quick_rect)
                             .layout(Layout::left_to_right(Align::Center)),
                     );
-                    in_ui.add_space(6.0);
-                    in_ui.label(RichText::new("›").size(14.0).color(ZenPalette::VERMILION));
-
-                    let hint = if self.pending_confirmation.is_some() {
-                        "Tape 'oui' ou 'non'…"
-                    } else {
-                        "Parle à Kaze (/menu, /zazen, /eveil)…"
-                    };
-                    let edit = egui::TextEdit::singleline(&mut self.input_text)
-                        .frame(false)
-                        .hint_text(
-                            RichText::new(hint)
-                                .size(11.5)
-                                .color(ZenPalette::SUMI_MUTED),
-                        )
-                        .font(FontId::new(12.0, FontFamily::Proportional))
-                        .desired_width(box_w - 24.0)
-                        .text_color(ZenPalette::SUMI_INK);
-
-                    let edit_resp = in_ui.add_enabled(!self.is_loading, edit);
-                    if self.focus_input_next {
-                        edit_resp.request_focus();
-                        self.focus_input_next = false;
-                    }
-
-                    // Flèche Haut pour rappeler la dernière demande
-                    if edit_resp.has_focus()
-                        && in_ui.input(|i| i.key_pressed(Key::ArrowUp))
-                        && self.input_text.is_empty()
+                    q_ui.set_clip_rect(quick_rect);
+                    q_ui.spacing_mut().item_spacing.x = 6.0;
+                    if zen_button(&mut q_ui, "Parler", BtnKind::Secondary, Vec2::new(62.0, 18.0))
+                        .clicked()
                     {
-                        if let Some(ref last) = self.last_user_prompt {
-                            self.input_text = last.clone();
-                        }
+                        self.bubble_open = true;
+                        self.focus_input_next = true;
+                    }
+                    if zen_button(&mut q_ui, "Zazen", BtnKind::Secondary, Vec2::new(62.0, 18.0))
+                        .clicked()
+                    {
+                        self.enter_zazen(ctx, false);
+                    }
+                    if zen_button(&mut q_ui, "Éveil", BtnKind::Secondary, Vec2::new(62.0, 18.0))
+                        .clicked()
+                    {
+                        self.open_dojo_window(ctx, MenuTab::Eveil);
+                    }
+                    if zen_button(&mut q_ui, "Voies", BtnKind::Secondary, Vec2::new(60.0, 18.0))
+                        .clicked()
+                    {
+                        self.open_dojo_window(ctx, MenuTab::Progression);
+                    }
+                }
+
+                // 3. Plaque Zazen ou Bulle Unique Washi juste au-dessus du chapeau de Kaze
+                if self.in_zazen {
+                    let plate_w = PET_WIN_WIDTH - 44.0;
+                    let plate_h = 158.0;
+                    let plate_rect = Rect::from_min_size(
+                        Pos2::new((PET_WIN_WIDTH - plate_w) * 0.5, hat_top_y - plate_h - 4.0),
+                        Vec2::new(plate_w, plate_h),
+                    );
+                    draw_pixel_plate(
+                        ui.painter(),
+                        plate_rect,
+                        ZenPalette::INDIGO_CARD,
+                        ZenPalette::JADE_LIGHT,
+                        Some(ZenPalette::JADE_LIGHT),
+                    );
+
+                    let inner = plate_rect.shrink2(Vec2::new(14.0, 10.0));
+                    let mut zazen_ui = ui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(inner)
+                            .layout(Layout::top_down(Align::Min)),
+                    );
+                    zazen_ui.set_clip_rect(inner);
+
+                    let med_secs = self.meditation_started_at.elapsed().as_secs_f32();
+                    let (phase, breath_ratio, cycles) = BreathPhase::compute(med_secs);
+                    let haiku = ZEN_HAIKUS[(cycles as usize) % ZEN_HAIKUS.len()];
+
+                    if cycles > self.last_breath_count {
+                        self.last_breath_count = cycles;
+                        self.progress.total_breaths += 1;
+                        self.progress.daily_breaths += 1;
+                        self.grant_xp(XpPath::Zazen, 2, "Souffle Zen");
                     }
 
-                    let enter_pressed =
-                        edit_resp.lost_focus() && in_ui.input(|i| i.key_pressed(Key::Enter));
+                    let (phase_txt, phase_col) = match phase {
+                        BreathPhase::Inhale => ("INSPIRATION LENTE (4s)", ZenPalette::JADE_LIGHT),
+                        BreathPhase::Hold => ("RÉTENTION SEREINE (3s)", ZenPalette::GOLD_LEAF),
+                        BreathPhase::Exhale => ("EXPIRATION PROFONDE (5s)", ZenPalette::SAKURA),
+                    };
 
-                    in_ui.add_space(4.0);
-                    let send_clicked = zen_button(
-                        &mut in_ui,
-                        if self.is_loading { "…" } else { ">" },
-                        BtnKind::Primary,
-                        Vec2::new(28.0, 22.0),
-                    )
-                    .clicked();
+                    zazen_ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new("MÉDITATION ZAZEN")
+                                .size(11.0)
+                                .color(ZenPalette::JADE_LIGHT),
+                        );
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.label(RichText::new(phase_txt).size(11.0).color(phase_col));
+                        });
+                    });
+                    zazen_ui.add_space(6.0);
 
-                    if (enter_pressed || send_clicked) && !self.is_loading {
-                        let msg = std::mem::take(&mut self.input_text);
-                        self.submit_input(ctx, msg);
+                    let (bar_rect, _) = zazen_ui
+                        .allocate_exact_size(Vec2::new(inner.width(), 8.0), Sense::hover());
+                    draw_pixel_bar(ui.painter(), bar_rect, breath_ratio, phase.color());
+                    zazen_ui.add_space(6.0);
+
+                    let mins = (med_secs / 60.0).floor() as u32;
+                    let secs = (med_secs % 60.0).floor() as u32;
+                    zazen_ui.label(
+                        RichText::new(format!(
+                            "{} souffles (+{} XP) • Durée {:02}:{:02}",
+                            cycles,
+                            cycles * 2,
+                            mins,
+                            secs
+                        ))
+                        .size(11.5)
+                        .color(ZenPalette::WASHI_BG),
+                    );
+                    zazen_ui.add_space(2.0);
+                    zazen_ui.label(RichText::new(haiku).size(10.5).color(ZenPalette::TEXT_DIM));
+                    zazen_ui.add_space(8.0);
+
+                    zazen_ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        if zen_button(
+                            ui,
+                            "Sortir de Zazen",
+                            BtnKind::Paper,
+                            Vec2::new(124.0, 22.0),
+                        )
+                        .clicked()
+                        {
+                            self.leave_zazen(ctx);
+                        }
+                        let corner_lbl = if self.meditation_in_corner {
+                            "Recentrer"
+                        } else {
+                            "Coin écran"
+                        };
+                        if zen_button(ui, corner_lbl, BtnKind::Secondary, Vec2::new(96.0, 22.0))
+                            .clicked()
+                        {
+                            self.toggle_meditation_corner(ctx);
+                        }
+                    });
+                } else if self.bubble_anim > 0.02 {
+                    let anim = self.bubble_anim;
+                    let bubble_w = PET_WIN_WIDTH - 24.0;
+                    let bubble_h = (self.bubble_h_anim * anim).max(64.0);
+                    let bubble_top_y = (hat_top_y - bubble_h).max(6.0);
+                    let bubble_rect = Rect::from_min_size(
+                        Pos2::new((PET_WIN_WIDTH - bubble_w) * 0.5, bubble_top_y),
+                        Vec2::new(bubble_w, bubble_h),
+                    );
+                    draw_washi_speech_bubble(ui.painter(), bubble_rect, mood_accent, anim);
+
+                    if anim > 0.65 {
+                        let box_rect = Rect::from_min_size(
+                            bubble_rect.min,
+                            Vec2::new(bubble_rect.width(), bubble_rect.height() - 15.0),
+                        );
+                        let content_rect = box_rect.shrink2(Vec2::new(14.0, 8.0));
+                        let mut bubble_ui = ui.new_child(
+                            egui::UiBuilder::new()
+                                .max_rect(content_rect)
+                                .layout(Layout::top_down(Align::Min)),
+                        );
+                        bubble_ui.set_clip_rect(content_rect);
+
+                        let header_res = bubble_ui.horizontal(|ui| {
+                            ui.add_space(18.0);
+                            let title = if self.pending_confirmation.is_some() {
+                                "CONFIRMATION"
+                            } else {
+                                self.animator.current_mood.label()
+                            };
+                            ui.label(
+                                RichText::new(format!("KAZE • {}", title))
+                                    .size(11.0)
+                                    .color(ZenPalette::VERMILION),
+                            );
+
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.spacing_mut().item_spacing.x = 3.0;
+                                if ui
+                                    .add(
+                                        egui::Button::new(
+                                            RichText::new("x")
+                                                .size(12.0)
+                                                .color(ZenPalette::SUMI_MUTED),
+                                        )
+                                        .frame(false),
+                                    )
+                                    .clicked()
+                                {
+                                    self.bubble_open = false;
+                                }
+                                if zen_button(ui, "Dojo", BtnKind::Paper, Vec2::new(40.0, 18.0))
+                                    .clicked()
+                                {
+                                    self.open_dojo_window(ctx, MenuTab::Eveil);
+                                }
+                                if let Some(ref md_path) = self.last_exported_md.clone() {
+                                    if zen_button(
+                                        ui,
+                                        "Ouvrir",
+                                        BtnKind::Paper,
+                                        Vec2::new(42.0, 18.0),
+                                    )
+                                    .clicked()
+                                    {
+                                        tasks::open_file_external(md_path);
+                                    }
+                                }
+                                if zen_button(ui, ".md", BtnKind::Paper, Vec2::new(30.0, 18.0))
+                                    .clicked()
+                                {
+                                    self.export_current_response_md("");
+                                }
+                                if zen_button(ui, "Copier", BtnKind::Paper, Vec2::new(44.0, 18.0))
+                                    .clicked()
+                                {
+                                    self.copy_current_response();
+                                }
+                                let (mode_lbl, mode_kind) = match self.bubble_view_mode {
+                                    BubbleViewMode::Zen => {
+                                        ("Zen", BtnKind::Selected(ZenPalette::VERMILION))
+                                    }
+                                    BubbleViewMode::Echange => {
+                                        ("Échange", BtnKind::Selected(ZenPalette::CYAN_SPIRIT))
+                                    }
+                                };
+                                if zen_button(ui, mode_lbl, mode_kind, Vec2::new(50.0, 18.0))
+                                    .clicked()
+                                {
+                                    self.bubble_view_mode = match self.bubble_view_mode {
+                                        BubbleViewMode::Zen => BubbleViewMode::Echange,
+                                        BubbleViewMode::Echange => BubbleViewMode::Zen,
+                                    };
+                                }
+                            });
+                        });
+                        if header_res.response.drag_started() {
+                            ctx.send_viewport_cmd(ViewportCommand::StartDrag);
+                        }
+                        bubble_ui.add_space(3.0);
+
+                        let body_h = (content_rect.height() - 62.0).max(42.0);
+
+                        match self.bubble_view_mode {
+                            BubbleViewMode::Zen => {
+                                if let Some(ref prompt) = self.last_user_prompt {
+                                    bubble_ui.label(
+                                        RichText::new(format!("« {} »", prompt))
+                                            .size(10.5)
+                                            .color(ZenPalette::SUMI_MUTED),
+                                    );
+                                }
+
+                                let displayed: String =
+                                    self.full_text.chars().take(self.revealed_chars).collect();
+                                let scroll_h = if self.pending_confirmation.is_some() {
+                                    (body_h - 36.0).max(32.0)
+                                } else {
+                                    (body_h
+                                        - if self.last_user_prompt.is_some() {
+                                            16.0
+                                        } else {
+                                            0.0
+                                        })
+                                    .max(36.0)
+                                };
+
+                                let _ = ScrollArea::vertical()
+                                    .id_salt("zen_bubble_scroll")
+                                    .max_height(scroll_h)
+                                    .auto_shrink([false, false])
+                                    .show(&mut bubble_ui, |ui| {
+                                        let lbl = ui.add(
+                                            egui::Label::new(
+                                                RichText::new(&displayed)
+                                                    .size(12.5)
+                                                    .color(ZenPalette::SUMI_INK),
+                                            )
+                                            .sense(Sense::click()),
+                                        );
+                                        if lbl.clicked() && self.revealed_chars < total_chars {
+                                            self.revealed_chars = total_chars;
+                                        }
+                                    });
+
+                                if self.pending_confirmation.is_some() {
+                                    bubble_ui.add_space(2.0);
+                                    bubble_ui.horizontal(|ui| {
+                                        ui.spacing_mut().item_spacing.x = 6.0;
+                                        if zen_button(
+                                            ui,
+                                            "Accepter (Entrée)",
+                                            BtnKind::Success,
+                                            Vec2::new(155.0, 21.0),
+                                        )
+                                        .clicked()
+                                        {
+                                            self.confirm_pending_action(ctx);
+                                        }
+                                        if zen_button(
+                                            ui,
+                                            "Refuser (Échap)",
+                                            BtnKind::Danger,
+                                            Vec2::new(155.0, 21.0),
+                                        )
+                                        .clicked()
+                                        {
+                                            self.reject_pending_action(ctx);
+                                        }
+                                    });
+                                }
+                            }
+
+                            BubbleViewMode::Echange => {
+                                let _ = ScrollArea::vertical()
+                                    .id_salt("echange_bubble_scroll")
+                                    .max_height(body_h)
+                                    .auto_shrink([false, false])
+                                    .stick_to_bottom(true)
+                                    .show(&mut bubble_ui, |ui| {
+                                        if self.history.is_empty() {
+                                            ui.label(
+                                                RichText::new(&self.full_text)
+                                                    .size(12.0)
+                                                    .color(ZenPalette::SUMI_INK),
+                                            );
+                                        } else {
+                                            for msg in &self.history {
+                                                if msg.role == "user" {
+                                                    ui.horizontal_wrapped(|ui| {
+                                                        ui.label(
+                                                            RichText::new("Vous : ")
+                                                                .size(10.5)
+                                                                .color(ZenPalette::SUMI_MUTED),
+                                                        );
+                                                        ui.label(
+                                                            RichText::new(&msg.content)
+                                                                .size(11.5)
+                                                                .color(ZenPalette::SUMI_INK),
+                                                        );
+                                                    });
+                                                } else {
+                                                    ui.horizontal_wrapped(|ui| {
+                                                        ui.label(
+                                                            RichText::new("Kaze : ")
+                                                                .size(10.5)
+                                                                .color(ZenPalette::VERMILION),
+                                                        );
+                                                        ui.label(
+                                                            RichText::new(&msg.content)
+                                                                .size(11.5)
+                                                                .color(ZenPalette::SUMI_INK),
+                                                        );
+                                                    });
+                                                }
+                                                ui.add_space(2.0);
+                                            }
+                                        }
+
+                                        if self.is_loading {
+                                            ui.label(
+                                                RichText::new("Kaze médite sur ta demande…")
+                                                    .size(11.0)
+                                                    .color(ZenPalette::VERMILION),
+                                            );
+                                        }
+
+                                        if self.pending_confirmation.is_some() {
+                                            ui.add_space(2.0);
+                                            ui.horizontal(|ui| {
+                                                ui.spacing_mut().item_spacing.x = 6.0;
+                                                if zen_button(
+                                                    ui,
+                                                    "Accepter",
+                                                    BtnKind::Success,
+                                                    Vec2::new(110.0, 20.0),
+                                                )
+                                                .clicked()
+                                                {
+                                                    self.confirm_pending_action(ctx);
+                                                }
+                                                if zen_button(
+                                                    ui,
+                                                    "Refuser",
+                                                    BtnKind::Danger,
+                                                    Vec2::new(110.0, 20.0),
+                                                )
+                                                .clicked()
+                                                {
+                                                    self.reject_pending_action(ctx);
+                                                }
+                                            });
+                                        }
+                                    });
+                            }
+                        }
+
+                        if let Some((ref msg, _)) = self.bubble_feedback {
+                            bubble_ui.label(RichText::new(msg).size(10.0).color(ZenPalette::JADE));
+                        }
+
+                        // Pied de la bulle : Saisie sur Parchemin Washi
+                        let input_row_rect = Rect::from_min_size(
+                            Pos2::new(content_rect.min.x, content_rect.max.y - 26.0),
+                            Vec2::new(content_rect.width(), 24.0),
+                        );
+                        let box_w = input_row_rect.width() - 34.0;
+                        let text_box_rect =
+                            Rect::from_min_size(input_row_rect.min, Vec2::new(box_w, 24.0));
+                        draw_washi_input_box(ui.painter(), text_box_rect, true);
+
+                        let mut in_ui = ui.new_child(
+                            egui::UiBuilder::new()
+                                .max_rect(input_row_rect)
+                                .layout(Layout::left_to_right(Align::Center)),
+                        );
+                        in_ui.add_space(6.0);
+                        in_ui.label(RichText::new("›").size(14.0).color(ZenPalette::VERMILION));
+
+                        let hint = if self.pending_confirmation.is_some() {
+                            "Tape 'oui' ou 'non'…"
+                        } else {
+                            "Parle à Kaze (/menu, /zazen, /eveil)…"
+                        };
+                        let edit = egui::TextEdit::singleline(&mut self.input_text)
+                            .frame(false)
+                            .hint_text(
+                                RichText::new(hint)
+                                    .size(11.5)
+                                    .color(ZenPalette::SUMI_MUTED),
+                            )
+                            .font(FontId::new(12.0, FontFamily::Proportional))
+                            .desired_width(box_w - 24.0)
+                            .text_color(ZenPalette::SUMI_INK);
+
+                        let edit_resp = in_ui.add_enabled(!self.is_loading, edit);
+                        if self.focus_input_next {
+                            edit_resp.request_focus();
+                            self.focus_input_next = false;
+                        }
+
+                        if edit_resp.has_focus()
+                            && in_ui.input(|i| i.key_pressed(Key::ArrowUp))
+                            && self.input_text.is_empty()
+                        {
+                            if let Some(ref last) = self.last_user_prompt {
+                                self.input_text = last.clone();
+                            }
+                        }
+
+                        let enter_pressed =
+                            edit_resp.lost_focus() && in_ui.input(|i| i.key_pressed(Key::Enter));
+
+                        in_ui.add_space(4.0);
+                        let send_clicked = zen_button(
+                            &mut in_ui,
+                            if self.is_loading { "…" } else { ">" },
+                            BtnKind::Primary,
+                            Vec2::new(28.0, 22.0),
+                        )
+                        .clicked();
+
+                        if (enter_pressed || send_clicked) && !self.is_loading {
+                            let msg = std::mem::take(&mut self.input_text);
+                            self.submit_input(ctx, msg);
+                        }
                     }
                 }
             }
 
-            // Popups d'XP flottants
+            // Popups d'XP flottants (visibles sur le Bureau comme dans le Dojo)
             for p in &self.xp_popups {
                 let age = p.spawn_time.elapsed().as_secs_f32();
                 let y_offset = age * 26.0;
@@ -2559,19 +3852,42 @@ fn main() -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().collect();
 
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("Kaze (Vent) - Compagnon Zen & Samouraï Desktop");
+        println!("Kaze (Vent) - Sensei Samouraï & Agent Autonome Desktop");
         println!();
         println!("USAGE:");
         println!("    ai-pet [OPTIONS]");
         println!();
         println!("OPTIONS:");
         println!("    -h, --help               Affiche cette aide");
+        println!("    --forge [BASE_MODEL]     Forge (fine-tune) le modèle Ollama `kaze-sensei:latest` via Modelfile.sensei");
         println!("    --cli [PROMPT]           Exécute une requête en mode ligne de commande sans interface graphique");
         println!("    --yes, -y                Auto-accepte les actions demandées en mode CLI");
         println!("    --no, -n                 Refuse les actions système demandées en mode CLI");
         println!("    --wayland                Force le backend Wayland sous Linux (par défaut X11)");
         println!();
         return Ok(());
+    }
+
+    if let Some(pos) = args.iter().position(|a| a == "--forge" || a == "--finetune") {
+        let base_model = args
+            .get(pos + 1)
+            .map(|s| s.as_str())
+            .unwrap_or(DEFAULT_MODEL);
+        println!(
+            "Forge du modèle spécialisé `{}` depuis `{}` (Modelfile.sensei + ROLE.md)…",
+            ollama::SENSEI_MODEL_NAME,
+            base_model
+        );
+        match ollama::forge_sensei_model(base_model) {
+            Ok(msg) => {
+                println!("{}", msg);
+                return Ok(());
+            }
+            Err(err) => {
+                eprintln!("Erreur lors de la forge : {}", err);
+                std::process::exit(1);
+            }
+        }
     }
 
     if let Some(pos) = args.iter().position(|a| a == "--cli") {
@@ -2644,7 +3960,7 @@ fn main() -> eframe::Result<()> {
         .with_title(WINDOW_TITLE)
         .with_app_id("ai-pet")
         .with_icon(kde::load_window_icon())
-        .with_inner_size([WIN_WIDTH, WIN_HEIGHT])
+        .with_inner_size([PET_WIN_WIDTH, PET_WIN_HEIGHT])
         .with_position([220.0, 180.0])
         .with_decorations(false)
         .with_transparent(true)

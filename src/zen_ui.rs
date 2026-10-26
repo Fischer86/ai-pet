@@ -61,12 +61,21 @@ pub fn install_pixel_fonts(ctx: &Context) {
         mono.insert(0, "pixelify".to_owned());
     }
 
-    // Polices système de secours pour les symboles et icônes Unicode
+    // Polices système de secours multi-plateformes (Linux, macOS, Windows) pour les symboles Unicode
     let fallback_paths = [
+        // Linux
         "/usr/share/fonts/gdouros-symbola/Symbola.ttf",
         "/usr/share/fonts/google-noto/NotoSansSymbols2-Regular.ttf",
         "/usr/share/fonts/TTF/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        // macOS
+        "/System/Library/Fonts/Apple Symbols.ttf",
+        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+        "/Library/Fonts/Arial Unicode.ttf",
+        // Windows
+        "C:\\Windows\\Fonts\\seguisym.ttf",
+        "C:\\Windows\\Fonts\\segoeui.ttf",
+        "C:\\Windows\\Fonts\\arial.ttf",
     ];
     for (idx, path) in fallback_paths.iter().enumerate() {
         if let Ok(bytes) = std::fs::read(path) {
@@ -333,13 +342,119 @@ pub fn zen_button(ui: &mut Ui, text: &str, kind: BtnKind, size: Vec2) -> Respons
             1.0_f32,
         ),
     };
-    ui.add(
+    ui.add_sized(
+        size,
         egui::Button::new(RichText::new(text).size(11.5).color(fg))
             .fill(fill)
             .stroke(Stroke::new(stroke_w, stroke_col))
             .corner_radius(CornerRadius::ZERO)
-            .min_size(size),
+            .truncate(),
     )
+}
+
+/// Carte de réponse d'Éveil responsive à largeur fixe avec retour à la ligne automatique (ne dépasse jamais).
+pub fn zen_quiz_option_card(
+    ui: &mut Ui,
+    prefix: &str,
+    text: &str,
+    kind: BtnKind,
+    size: Vec2,
+) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+    let hovered = resp.hovered();
+
+    let (mut fill, fg, border_col, badge_bg, badge_fg) = match kind {
+        BtnKind::Success => (
+            ZenPalette::JADE,
+            ZenPalette::WASHI_BG,
+            ZenPalette::SUMI_INK,
+            ZenPalette::SUMI_INK,
+            ZenPalette::JADE_LIGHT,
+        ),
+        BtnKind::Danger => (
+            ZenPalette::VERMILION,
+            ZenPalette::WASHI_BG,
+            ZenPalette::SUMI_INK,
+            ZenPalette::SUMI_INK,
+            ZenPalette::WASHI_BG,
+        ),
+        BtnKind::Secondary => (
+            ZenPalette::INDIGO_PILL,
+            ZenPalette::TEXT_DIM,
+            ZenPalette::SUMI_INK,
+            Color32::from_rgb(38, 44, 62),
+            ZenPalette::TEXT_DIM,
+        ),
+        _ => (
+            ZenPalette::WASHI_BUTTON,
+            ZenPalette::SUMI_INK,
+            if hovered {
+                ZenPalette::VERMILION
+            } else {
+                ZenPalette::SUMI_MUTED
+            },
+            if hovered {
+                ZenPalette::VERMILION
+            } else {
+                ZenPalette::SUMI_INK
+            },
+            ZenPalette::WASHI_BG,
+        ),
+    };
+
+    if hovered && matches!(kind, BtnKind::Paper) {
+        fill = ZenPalette::WASHI_BG;
+    }
+
+    let painter = ui.painter();
+    fill_px(painter, rect.min.x, rect.min.y, rect.width(), rect.height(), border_col);
+    fill_px(
+        painter,
+        rect.min.x + 2.0,
+        rect.min.y + 2.0,
+        rect.width() - 4.0,
+        rect.height() - 4.0,
+        fill,
+    );
+
+    // Badge lettre (A, B, C, D) à gauche
+    let badge_rect = Rect::from_min_size(
+        Pos2::new(rect.min.x + 8.0, rect.min.y + 8.0),
+        Vec2::new(22.0, 22.0),
+    );
+    fill_px(
+        painter,
+        badge_rect.min.x,
+        badge_rect.min.y,
+        badge_rect.width(),
+        badge_rect.height(),
+        badge_bg,
+    );
+    painter.text(
+        badge_rect.center(),
+        Align2::CENTER_CENTER,
+        prefix,
+        FontId::new(12.0, FontFamily::Proportional),
+        badge_fg,
+    );
+
+    // Texte multi-lignes contraint et clippé à l'intérieur de la carte
+    let text_rect = Rect::from_min_max(
+        Pos2::new(rect.min.x + 36.0, rect.min.y + 6.0),
+        Pos2::new(rect.max.x - 8.0, rect.max.y - 6.0),
+    );
+    let mut child_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(text_rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    child_ui.set_clip_rect(text_rect);
+    child_ui.add(
+        egui::Label::new(RichText::new(text).size(12.0).color(fg))
+            .wrap(),
+    );
+
+    resp
 }
 
 /// Dessine un encart de saisie sur parchemin Washi (lisible, doux, sans boîte noire).
@@ -649,6 +764,77 @@ impl ZenParticles {
             let c = Color32::from_rgba_unmultiplied(r, g, b, ((a as f32) * pulse) as u8);
 
             fill_px(painter, p.pos.x, p.pos.y, p.size, p.size, c);
+        }
+    }
+}
+
+/// Dessine l'image de fond du Dojo (`background_dojo.jpeg`, ratio 16:9) en mode `cover`
+/// sans déformation quelle que soit la taille redimensionnée de la fenêtre, avec une
+/// fine bordure en bois laqué et feuille d'or.
+pub fn draw_dojo_background_cover(painter: &Painter, rect: Rect, tex_id: egui::TextureId) {
+    let img_aspect = 1376.0_f32 / 768.0_f32;
+    let win_w = rect.width().max(1.0);
+    let win_h = rect.height().max(1.0);
+    let win_aspect = win_w / win_h;
+
+    let uv = if win_aspect > img_aspect {
+        // Fenêtre plus large que 16:9 : on recadre légèrement en haut/bas
+        let visible_h = img_aspect / win_aspect;
+        let y0 = (1.0 - visible_h) * 0.5;
+        Rect::from_min_max(Pos2::new(0.0, y0), Pos2::new(1.0, y0 + visible_h))
+    } else {
+        // Fenêtre plus haute que 16:9 : on recadre légèrement à gauche/droite
+        let visible_w = win_aspect / img_aspect;
+        let x0 = (1.0 - visible_w) * 0.5;
+        Rect::from_min_max(Pos2::new(x0, 0.0), Pos2::new(x0 + visible_w, 1.0))
+    };
+
+    painter.image(tex_id, rect, uv, Color32::WHITE);
+
+    // Cadre extérieur en bois laqué & filet doré
+    let x = rect.min.x;
+    let y = rect.min.y;
+    let w = rect.width();
+    let h = rect.height();
+    fill_px(painter, x, y, w, 3.0, ZenPalette::SUMI_INK);
+    fill_px(painter, x, y + h - 3.0, w, 3.0, ZenPalette::SUMI_INK);
+    fill_px(painter, x, y, 3.0, h, ZenPalette::SUMI_INK);
+    fill_px(painter, x + w - 3.0, y, 3.0, h, ZenPalette::SUMI_INK);
+
+    fill_px(painter, x + 3.0, y + 3.0, w - 6.0, 1.0, ZenPalette::GOLD_LEAF);
+    fill_px(painter, x + 3.0, y + h - 4.0, w - 6.0, 1.0, ZenPalette::GOLD_LEAF);
+    fill_px(painter, x + 3.0, y + 3.0, 1.0, h - 6.0, ZenPalette::GOLD_LEAF);
+    fill_px(painter, x + w - 4.0, y + 3.0, 1.0, h - 6.0, ZenPalette::GOLD_LEAF);
+}
+
+/// Dessine l'ombre portée en pixel-art sous les sandales de Kaze lorsqu'il se tient sur le tatami du Dojo.
+pub fn draw_tatami_shadow(painter: &Painter, feet_center: Pos2, width: f32) {
+    let cx = feet_center.x.round();
+    let cy = feet_center.y.round();
+    let w1 = width.round();
+    let w2 = (width * 0.72).round();
+    let sh1 = Color32::from_rgba_unmultiplied(18, 22, 14, 120);
+    let sh2 = Color32::from_rgba_unmultiplied(12, 15, 10, 165);
+    fill_px(painter, cx - w1 * 0.5, cy - 3.0, w1, 6.0, sh1);
+    fill_px(painter, cx - w2 * 0.5, cy - 6.0, w2, 12.0, sh2);
+}
+
+/// Dessine la poignée de redimensionnement en pixel-art dans l'angle inférieur droit de la fenêtre du Dojo.
+pub fn draw_resize_grip(painter: &Painter, bottom_right: Pos2, hovered: bool) {
+    let col = if hovered {
+        ZenPalette::GOLD_LEAF
+    } else {
+        Color32::from_rgba_unmultiplied(214, 166, 68, 175)
+    };
+    let bx = bottom_right.x.round() - 6.0;
+    let by = bottom_right.y.round() - 6.0;
+    for step in 0..4 {
+        let offset = step as f32 * 4.0;
+        fill_px(painter, bx - offset, by, 3.0, 3.0, ZenPalette::SUMI_INK);
+        fill_px(painter, bx - offset - 1.0, by - 1.0, 2.0, 2.0, col);
+        if step > 0 {
+            fill_px(painter, bx, by - offset, 3.0, 3.0, ZenPalette::SUMI_INK);
+            fill_px(painter, bx - 1.0, by - offset - 1.0, 2.0, 2.0, col);
         }
     }
 }

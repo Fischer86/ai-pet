@@ -1,74 +1,125 @@
-# 🎋 Kaze (風) — Compagnon AI Pet Samouraï Zen & Centre de Contrôle en Rust
+# 🎋 Kaze (風) — Sensei Samouraï Pixel-Art & Agent Autonome de Bureau
 
-![Samurai Sprite](assets/Samurai/5x/idle_0.png) ![Samurai Run](assets/Samurai/5x/run_1.png) ![Samurai Jump](assets/Samurai/5x/jump_2.png) ![Samurai Attack](assets/Samurai/5x/attack_3.png) ![Samurai Meditate](assets/Samurai/5x/swim_1.png)
+**Kaze** (*« Le Vent »*) est un compagnon de bureau **Pixel-Art Zen** et un **agent IA autonome** écrit en **Rust** (`eframe` / `egui`) propulsé localement par **Ollama**.
 
-**Kaze (風)** est un compagnon de bureau (**AI Pet**) écrit en **Rust** (`eframe`/`egui`, `sysinfo`, `arboard`, `x11rb`) doté d'une interface **Pixel-Art Zen** épurée, d'une **bulle de dialogue unique tout-en-un**, d'un **Centre de Contrôle (/menu)** sous forme de vraie fenêtre dédiée, d'un **système de progression RPG/Zen (XP, Niveaux, Rangs Samouraï)**, d'un **Dojo d'apprentissage interactif piloté par l'IA**, d'un **mode de méditation guidée Zazen**, et d'un **gestionnaire d'autorisations (Human-in-the-Loop)** sécurisé compatible **Linux (KDE Plasma Wayland/X11), macOS et Windows**.
-
----
-
-## ✨ Fonctionnalités Clés
-
-### 🏮 1. Expérience de Bureau Épurée & Bulle Unique Tout-en-Un
-- **Présence discrète sur le bureau** : Au repos, vous ne voyez **que Kaze** sur son îlot flottant pixel-art avec sa jauge d'XP sous lui. Aucune grande boîte permanente n'encombre l'écran.
-- **Double-clic sur Kaze** : Ouvre / ferme **une seule bulle de dialogue** située **juste au-dessus du personnage**, sa queue descendant précisément vers son chapeau de paille sans aucun vide.
-- **Tout dans la même bulle** :
-  - **En-tête** : Sceau Hanko, humeur, boutons d'action (`[Copier]`, `[.md]`, `[Ouvrir]`, `[Menu]`, `[x]`).
-  - **Bascule de mode d'affichage** :
-    - **Mode Zen** : Affiche uniquement la dernière demande et la réponse actuelle (zéro distraction).
-    - **Mode Échange** : Affiche le fil de discussion complet défilant.
-  - **Zone de saisie intégrée** : Champ de commande et de dialogue directement au bas de la bulle (`Parle à Kaze (/menu, /zazen, /eveil)...`) avec touche Entrée ou bouton `>`.
-
-### 🎴 2. Le Centre de Contrôle (`/menu`) — Vraie Fenêtre Dédiée
-Accessible par la commande `/menu` ou en cliquant sur le bouton **`[Menu]`** de la bulle / de la jauge d'XP. Ouvre une vraie fenêtre de contrôle avec 6 onglets complets :
-1. **🏯 Éveil (Dojo d'apprentissage IA)** : Choix de sujets (Philosophie Zen, Rust, Histoire, Linux...), génération de quiz à 4 choix via Ollama, feedback instantané avec explication détaillée et récompenses en XP.
-2. **🧘 Zazen (Méditation guidée)** : Suivi en direct du cycle 4-3-5 (Inspiration 4s, Rétention 3s, Expiration 5s), Enso calligraphié, chrono, bouton pour envoyer Kaze dans un coin d'écran (`[Coin écran]`) ou le recentrer (`[Recentrer]`).
-3. **🎴 Actions Rapides** : Pomodoros 25m, Sablier thé 3m, Pause 5m, Bilans système (CPU, RAM, Réseau, Batterie), Audio (Volume +/-, Muet), Capture d'écran, Terminal, Presse-papiers.
-4. **📜 Historique & Contexte** : Consultation de tous les échanges, export complet en `.md`, vidage d'historique et état environnemental en direct.
-5. **🛡️ Autorisations (Permissions & Auto-Approbation)** : Configuration détaillée des actions autorisées automatiquement sans pop-up de confirmation vs celles requérant une validation explicite.
-6. **🧠 Mémoire & Compétences** : Mémorisation durable de faits (`memory.json`), consultation des souvenirs, changement de modèle IA Ollama actif et catalogue des skills.
-
-### 🏆 3. Progression, Rangs Samouraï & 3 Voies de Sagesse
-- **Niveaux (1 à 50+) & 8 Rangs** : Progression de `Deshi (Disciple)` à `Satori (Éveillé)`.
-- **3 Voies d'XP Dédiées** :
-  - 🧘 **Voie du Zazen** : +2 XP par souffle complet complété, bonus de session.
-  - 📚 **Voie de l'Éveil** : +15 XP par bonne réponse au Dojo, bonus de série (streaks).
-  - ⚔️ **Voie du Bushidō** : +30 XP par cycle Pomodoro, +6 XP par minuteur, actions système et fidélité quotidienne.
-- **Popups d'XP Flottants** animés au-dessus de l'îlot.
+À la fois **Sensei attentif**, **maître de méditation Zazen**, **précepteur d'apprentissage (Dojo d'Éveil)** et **gardien système (Bushidō)**, Kaze vit directement sur votre bureau en transparence totale ou vous accueille dans la grande fenêtre redimensionnable de son **Sanctuaire Dojo**.
 
 ---
 
-## 📦 Prérequis & Installation
+## ✨ Fonctionnalités Principales
 
-1. **Rust** (1.75+) :
+### 1. 🏯 Deux Modes Visuels Complémentaires
+- **Mode Compagnon Flottant (Bureau 100 % Transparent)** :
+  - Kaze flotte sur son îlot pixel-art évolutif (bonsaï, lanterne *Tōrō*, torii, autel d'or selon votre niveau) sans aucun fond ni cadre opaque.
+  - **Double-clic** (ou clic droit) sur Kaze : déploie une **bulle unique en papier Washi** juste au-dessus de son chapeau *kasa*, regroupant la réponse du Sensei, le champ de saisie, ainsi que les boutons **Copier**, **`.md`** (export Markdown) et **Dojo**.
+  - Deux modes de lecture dans la bulle : **Mode Zen** (uniquement la demande et la réponse actuelles) ou **Mode Échange** (historique complet).
+- **Grande Fenêtre Redimensionnable du Sanctuaire Dojo (`/menu`, `/dojo` ou `/eveil`)** :
+  - Véritable fenêtre redimensionnable avec l'arrière-plan pixel-art `assets/background_dojo.jpeg` (tatami, jardin de bambous et alcôve *Tokonoma*).
+  - **Interface 100 % responsive** : chaque panneau, barre d'onglets, jauge d'XP et carte de réponse QCM s'adapte dynamiquement à la largeur de la fenêtre sans jamais déborder.
+
+### 2. 🧭 Menu Cohérent & Volontaire (5 Piliers + Directive du Sensei)
+Dès l'ouverture du Dojo, une **Bannière de Directive Volontaire du Sensei** analyse votre équilibre du jour et vous propose une action immédiate en 1 clic (**« Suivre > »** ou **« Initiative Sensei »**), suivie de **5 onglets cohérents** :
+1. **Éveil** : Enseignement interactif et énigmes QCM générées par le Sensei sur le sujet de votre choix (*Philosophie Zen, Rust, Linux, Histoire, Sciences…*).
+2. **Zazen** : Méditation guidée sur le rythme respiratoire **4s Inspiration • 3s Rétention • 5s Expiration**, avec halo *Ensō* animé, haïkus et gain d'XP à chaque cycle de souffle.
+3. **Bushidō** : Rituels de concentration (**Pomodoro**, minuteurs), bilans système temps réel (CPU, RAM, réseau, batterie), contrôle audio/média et outils de bureau.
+4. **Voies & Titres** : Vue complète de votre **Niveau Global**, des **3 Voies de Sagesse**, galerie des **12 Titres d'Honneur (*Shōgō*) équipables**, journal des derniers gains d'XP et export `.md` des chroniques.
+5. **Sensei & IA** : Charte [`ROLE.md`](./ROLE.md), forge en 1 clic du modèle spécialisé `kaze-sensei`, activation de l'**autonomie proactive**, mémoire long-terme (`memory.json`) et garde-fous de sécurité.
+
+### 3. 📜 Rôle de Sensei (`ROLE.md`) & Modèle Fine-Tuné (`Modelfile.sensei`)
+- **[`ROLE.md`](./ROLE.md)** définit la charte complète du Sensei : identité, ton calme et volontaire, pédagogie des Trois Voies, mémorisation autonome et protocole d'action JSON.
+- **[`Modelfile.sensei`](./Modelfile.sensei)** permet de créer dans Ollama le modèle spécialisé **`kaze-sensei:latest`** avec :
+  - Paramètres d'inférence calibrés (`temperature 0.32`, `top_p 0.88`, `repeat_penalty 1.12`, `num_ctx 4096`).
+  - Instructions système du Sensei et exemples *few-shot* intégrés pour garantir des réponses structurées et sobres.
+- **Forge en 1 clic** depuis l'onglet **Sensei & IA** (bouton *« Forger kaze-sensei »*), via la commande `/forge`, ou en ligne de commande :
+  ```bash
+  cargo run --release -- --forge
+  ```
+
+### 4. ⚡ Agent Plus Autonome
+- **Auto-Mémorisation (`auto_remember`)** : Lorsqu'au fil d'une conversation Kaze découvre un fait important sur vous (langage préféré, projet en cours, objectif d'apprentissage), il l'extrait et l'enregistre de lui-même dans sa mémoire durable (`memory.json`).
+- **Initiatives Volontaires du Sensei** : Lorsque l'autonomie est active, le Sensei observe périodiquement votre état (ou répond immédiatement au bouton *« Initiative Sensei »* / `/sensei`) pour vous conseiller ou vous proposer une action concrète (ex. lancer un Pomodoro ou inspecter les processus gourmands).
+- **Exécution Automatique Configurable** : Choisissez quelles familles d'actions (*Bilans système, Audio/Média, Minuteurs, Lecture de notes/fichiers, Applications, Shell*) s'exécutent directement sans confirmation manuelle.
+
+### 5. ⭐ Progression, Titres d'Honneur & Sauvegarde Atomique
+- **3 Voies d'Expérience** :
+  - **Voie du Zazen** (Jade) : Souffles conscients et sessions de méditation.
+  - **Voie de l'Éveil** (Or) : Énigmes du Sensei résolues et séries de bonnes réponses.
+  - **Voie du Bushidō** (Sakura) : Pomodoros accomplis, minuteurs et maîtrise du système.
+- **10 Rangs Globaux** (*Tamago* → *Deshi* → *Ashigaru* → *Bushi* → *Rōnin* → *Samouraï* → *Hatamoto* → *Kensei* → *Shōgun* → *Satori*) + **12 Titres d'Honneur (*Shōgō*)** déblocables et équipables à tout moment.
+- **Conservation Garantie (`progress.json`)** : Sauvegarde atomique via fichier temporaire (`progress.json.tmp` puis renommage) doublée d'une copie de secours automatique (`progress.backup.json`) restaurée en cas d'arrêt brusque.
+
+---
+
+## 🖥️ Compatibilité Multi-Plateforme (Linux, macOS, Windows)
+
+Kaze est conçu pour fonctionner nativement sur **Linux**, **macOS** et **Windows** :
+
+| Fonctionnalité | 🐧 Linux (X11 / Wayland / KDE / GNOME) | 🍎 macOS ( Intel & Apple Silicon ) | 🪟 Windows (10 / 11) |
+| :--- | :--- | :--- | :--- |
+| **Fenêtre & Transparence** | `eframe` + règles KWin / X11 EWMH | Fenêtre transparente Cocoa Always-On-Top | Fenêtre transparente Win32 / DirectX |
+| **Polices & Symboles** | DejaVu Sans / Noto Sans Symbols | Apple Symbols / Arial Unicode | Segoe UI Symbol / Segoe UI |
+| **Contrôle Audio (`/vol`)** | `wpctl` / `pactl` / `amixer` | `osascript` (volume relatif/absolu & mute) | Touches média Win32 via PowerShell |
+| **Contrôle Média (`/media`)** | `playerctl` | `osascript` (`Spotify` & `Music`) | Touches multimédias virtuelles Windows |
+| **Capture d'écran (`/shot`)** | `spectacle` / `grim` / `gnome-screenshot` | `screencapture` natif | Presse-papiers / outils natifs |
+| **Ouverture Fichiers / URLs** | `xdg-open` | `open` | `cmd /C start` / `explorer` |
+| **Données Persistantes** | `~/.local/share/ai-pet/` | `~/Library/Application Support/ai-pet/` | `%APPDATA%\ai-pet\` |
+
+---
+
+## 🚀 Installation & Démarrage
+
+### Prérequis
+1. **[Rust](https://rustup.rs/)** (édition 2021, stable).
+2. **[Ollama](https://ollama.com/)** installé sur votre machine.
+3. Un modèle local téléchargé dans Ollama (par défaut `qwen2.5:7b` ou tout autre modèle) :
    ```bash
-   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-   ```
-2. **Ollama** avec le modèle léger par défaut `qwen2.5:3b` :
-   ```bash
-   ollama pull qwen2.5:3b
+   ollama pull qwen2.5:7b
    ```
 
----
-
-## 🚀 Compilation & Lancement
-
+### Compilation & Lancement
 ```bash
-# Lancer l'application
-cargo run
+# 1. Compiler et lancer Kaze en mode graphique
+cargo run --release
 
-# Compiler un binaire optimisé pour la production
-cargo build --release
-./target/release/ai-pet
-
-# Aide en ligne de commande
-cargo run -- --help
-
-# Mode CLI sans interface graphique
-cargo run -- --cli "Liste les fichiers du dossier courant" --yes
+# 2. (Recommandé) Forger le modèle spécialisé Sensei (`kaze-sensei:latest`)
+cargo run --release -- --forge
 ```
 
 ---
 
-## 📜 Licence
+## ⌨️ Commandes Slash & Raccourcis
 
-Distribué sous licence **MIT**. Voir le fichier [LICENSE](LICENSE).
+Depuis la bulle de Kaze ou la barre de discussion du Dojo :
+
+| Commande | Description |
+| :--- | :--- |
+| `/menu` ou `/dojo` | Ouvre ou ferme la grande fenêtre redimensionnable du Sanctuaire Dojo |
+| `/eveil [sujet]` | Ouvre le Dojo d'Éveil et lance une énigme sur le sujet indiqué |
+| `/zazen [coin]` | Lance la méditation Zazen guidée (ajoutez `coin` pour méditer dans le coin de l'écran) |
+| `/xp` ou `/titres` | Ouvre directement l'onglet **Voies & Titres** (EXP, rangs et *Shōgō*) |
+| `/sensei` | Demande immédiatement une **initiative volontaire** au Sensei |
+| `/forge` | Forge / fine-tune le modèle Ollama `kaze-sensei:latest` depuis [`Modelfile.sensei`](./Modelfile.sensei) |
+| `/role` | Ouvre l'onglet **Sensei & IA** pour consulter [`ROLE.md`](./ROLE.md) et régler l'autonomie |
+| `/pomo [minutes]` | Démarre une session Pomodoro Zen (défaut : 25 min, +30 XP Bushidō à la fin) |
+| `/timer 5m [nom]` | Lance un sablier personnalisé |
+| `/sys`, `/top`, `/net`, `/bat` | Affiche le bilan système, les processus gourmands, le réseau ou la batterie |
+| `/vol +10`, `/vol -10`, `/vol mute` | Ajuste ou coupe le volume système (Linux, macOS, Windows) |
+| `/media toggle`, `/media next` | Contrôle le lecteur multimédia actif |
+| `/zen` / `/echange` | Bascule la bulle entre le mode Zen épuré et le fil d'échange complet |
+| `/balade` | Active ou désactive la marche autonome de Kaze sur le bureau |
+| `/export [nom]` | Exporte la dernière réponse ou l'historique en fichier Markdown `.md` |
+| `/quit` | Salue le Sensei et referme proprement le sanctuaire |
+
+---
+
+## 📂 Architecture du Projet
+
+- [`ROLE.md`](./ROLE.md) : Charte identitaire, pédagogique et comportementale du Sensei Kaze.
+- [`Modelfile.sensei`](./Modelfile.sensei) : Modelfile Ollama spécialisé (paramètres calibrés + *few-shot* Sensei).
+- [`src/main.rs`](./src/main.rs) : Boucle d'application `eframe`, mode Compagnon transparent, fenêtre redimensionnable du Dojo, bannière volontaire du Sensei et gestion des 5 piliers.
+- [`src/zen_ui.rs`](./src/zen_ui.rs) : Moteur graphique Pixel-Art Washi/Laque/Or, boutons et cartes QCM 100 % responsives, halo Zazen *Ensō* et particules.
+- [`src/progress.rs`](./src/progress.rs) : Système d'EXP (3 Voies), 10 rangs, 12 Titres d'Honneur (*Shōgō*), calcul de la Directive du Sensei et sauvegarde atomique `progress.json` + backup.
+- [`src/ollama.rs`](./src/ollama.rs) : Client Ollama, injection dynamique de [`ROLE.md`](./ROLE.md), forge de `kaze-sensei`, auto-mémorisation (`auto_remember`) et initiatives proactives.
+- [`src/tasks.rs`](./src/tasks.rs) : Actions système multi-plateformes (Linux, macOS, Windows).
+- [`src/awareness.rs`](./src/awareness.rs) : Conscience profonde du système, registre de minuteurs/Pomodoros, notes et mémoire long-terme (`memory.json`).
+- [`src/sprites.rs`](./src/sprites.rs) : Découpage et animation des spritesheets Pixel-Art du samouraï et chargement de `assets/background_dojo.jpeg`.

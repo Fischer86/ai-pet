@@ -1,13 +1,40 @@
 use crate::awareness;
+use crate::kde;
 use crate::sprites::PetMood;
 use crate::tasks::{self, PetTask};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::fs;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
 const OLLAMA_BASE: &str = "http://127.0.0.1:11434";
 pub const DEFAULT_MODEL: &str = "qwen2.5:3b";
+pub const SENSEI_MODEL_NAME: &str = "kaze-sensei:latest";
+
+const EMBEDDED_ROLE_MD: &str = include_str!("../ROLE.md");
+const EMBEDDED_MODELFILE_SENSEI: &str = include_str!("../Modelfile.sensei");
+
+/// Retourne le chemin du fichier `ROLE.md` (priorité au fichier local `./ROLE.md` s'il existe,
+/// sinon copie modifiable dans le dossier applicatif `app_data_dir()/ROLE.md`).
+pub fn role_file_path() -> PathBuf {
+    let local = PathBuf::from("ROLE.md");
+    if local.exists() {
+        return local;
+    }
+    let app_role = kde::app_data_dir().join("ROLE.md");
+    if !app_role.exists() {
+        let _ = fs::write(&app_role, EMBEDDED_ROLE_MD);
+    }
+    app_role
+}
+
+/// Charge le contenu actif de `ROLE.md` définissant la personnalité et la pédagogie du Sensei.
+pub fn load_role_markdown() -> String {
+    let path = role_file_path();
+    fs::read_to_string(path).unwrap_or_else(|_| EMBEDDED_ROLE_MD.to_string())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
@@ -23,6 +50,8 @@ struct StructuredAgentPlan {
     planned_action: String,
     #[serde(default)]
     fallback_if_refused: String,
+    #[serde(default)]
+    auto_remember: String,
     #[serde(default)]
     mood: String,
     #[serde(default)]
@@ -52,11 +81,11 @@ impl PendingAgentAction {
             user_intent: format!("Exécuter la commande « {} ».", cmd_label),
             planned_action: desc.clone(),
             fallback_if_refused:
-                "Je n'exécuterai aucune commande et resterai à votre écoute pour discuter."
+                "Je n'exécuterai aucune commande et resterai à votre écoute au Dojo."
                     .to_string(),
             mood,
             proposal_reply: format!(
-                "Je m'apprête à effectuer cette action : {}. Me donnez-vous votre accord ?",
+                "Disciple, je m'apprête à accomplir cette action : {}. Me donnez-vous votre accord ?",
                 desc
             ),
             task: PetTask {
@@ -73,14 +102,14 @@ impl PendingAgentAction {
             format!("« {} »", self.task.arg)
         };
         format!(
-            "🛡️ CONFIRMATION D'ACTION REQUISE\n\
+            "CONFIRMATION DU SENSEI REQUISE\n\
             ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\
-            🎯 1. Que veut l'utilisateur ?\n   {}\n\
-            🛠️ 2. Que vais-je faire ?\n   {} [Action: `{}` | Arg: {}]\n\
-            🍃 3. Et si vous refusez ?\n   {}\n\
+            1. Objectif compris : {}\n\
+            2. Action prévue : {} [`{}` {}]\n\
+            3. Plan alternatif : {}\n\
             ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\
-            💬 Kaze : « {} »\n\n\
-            👉 Acceptez-vous cette action ? (Boutons ci-dessous ou [Entrée = Oui / Échap = Non])",
+            Sensei Kaze : « {} »\n\n\
+            Acceptez-vous cette action ? ([Entrée = Oui / Échap = Non])",
             self.user_intent,
             self.planned_action,
             self.task.action,
@@ -98,7 +127,7 @@ pub enum AgentTurnOutcome {
         mood: PetMood,
         display_text: String,
     },
-    /// L'agent souhaite effectuer une action (même mondaine) et demande la permission à l'utilisateur.
+    /// L'agent souhaite effectuer une action et demande la permission à l'utilisateur.
     NeedsConfirmation(PendingAgentAction),
 }
 
@@ -116,17 +145,88 @@ pub fn check_ollama_running() -> bool {
         .unwrap_or(false)
 }
 
+/// Forge (fine-tune via Modelfile Ollama) le modèle spécialisé `kaze-sensei:latest`
+/// à partir du modèle de base choisi et de la charte `ROLE.md`.
+pub fn forge_sensei_model(base_model: &str) -> Result<String, String> {
+    if !check_ollama_running() {
+        let _ = ensure_ollama_started()?;
+    }
+
+    let clean_base = if base_model.starts_with("kaze-sensei") {
+        DEFAULT_MODEL
+    } else {
+        base_model
+    };
+
+    let role_md = load_role_markdown();
+    let custom_modelfile = format!(
+        "FROM {}\n\
+        PARAMETER temperature 0.32\n\
+        PARAMETER top_p 0.88\n\
+        PARAMETER top_k 40\n\
+        PARAMETER repeat_penalty 1.12\n\
+        PARAMETER num_ctx 4096\n\n\
+        SYSTEM \"\"\"\n\
+        {}\n\
+        \"\"\"\n\n\
+        MESSAGE user \"Je commence à travailler sur mon projet en Rust, mais j'ai du mal à rester concentré.\"\n\
+        MESSAGE assistant \"{{\\\"user_intent\\\":\\\"Se concentrer efficacement sur son projet en Rust\\\",\\\"planned_action\\\":\\\"Lancer une session Pomodoro Zen de 25 minutes\\\",\\\"fallback_if_refused\\\":\\\"Proposer trois respirations Zazen ou un découpage de sa tâche en étapes simples\\\",\\\"auto_remember\\\":\\\"Développe un projet en Rust\\\",\\\"mood\\\":\\\"special\\\",\\\"reply\\\":\\\"Un sabre ne se forge pas dans la dispersion, Disciple. Je te propose d'allumer un sablier Pomodoro de 25 minutes consacré uniquement à ton code Rust. Ouvrons-nous ce cycle de discipline ?\\\",\\\"task\\\":{{\\\"action\\\":\\\"pomodoro\\\",\\\"arg\\\":\\\"25\\\"}}}}\"\n\
+        MESSAGE user \"Explique-moi la différence entre Stack et Heap simplement.\"\n\
+        MESSAGE assistant \"{{\\\"user_intent\\\":\\\"Comprendre la différence entre la pile (Stack) et le tas (Heap)\\\",\\\"planned_action\\\":\\\"Répondre directement par une métaphore martiale et technique limpide\\\",\\\"fallback_if_refused\\\":\\\"Continuer l'explication avec un exemple en Rust\\\",\\\"auto_remember\\\":\\\"Étudie la gestion mémoire (Stack et Heap)\\\",\\\"mood\\\":\\\"idle\\\",\\\"reply\\\":\\\"Imagine la Pile (Stack) comme le râtelier de sabres à portée de main : chaque lame de taille fixe y est posée et reprise instantanément dans l'ordre inverse (LIFO). Le Tas (Heap) est le grand entrepôt du Dojo : on y réserve de l'espace sur mesure pour des objets dynamiques, mais il faut un pointeur sur le râtelier pour retrouver leur emplacement.\\\",\\\"task\\\":{{\\\"action\\\":\\\"none\\\",\\\"arg\\\":\\\"\\\"}}}}\"\n",
+        clean_base,
+        role_md.replace("\"\"\"", "'''")
+    );
+
+    let modelfile_path = kde::app_data_dir().join("Modelfile.sensei");
+    fs::write(&modelfile_path, &custom_modelfile)
+        .unwrap_or_else(|_| {
+            let _ = fs::write(&modelfile_path, EMBEDDED_MODELFILE_SENSEI);
+        });
+
+    let output = Command::new("ollama")
+        .args([
+            "create",
+            "kaze-sensei",
+            "-f",
+            &modelfile_path.to_string_lossy(),
+        ])
+        .output()
+        .map_err(|e| format!("Impossible d'exécuter `ollama create kaze-sensei` : {}", e))?;
+
+    if output.status.success() {
+        Ok(format!(
+            "Modèle spécialisé `{}` forgé avec succès à partir de `{}` et `ROLE.md` !\nSensei Kaze utilise désormais cet esprit affûté.",
+            SENSEI_MODEL_NAME, clean_base
+        ))
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        Err(format!(
+            "Échec de `ollama create kaze-sensei` : {}",
+            if stderr.is_empty() {
+                "vérifiez que le modèle de base est bien téléchargé (`ollama pull qwen2.5:3b`)."
+            } else {
+                &stderr
+            }
+        ))
+    }
+}
+
 pub fn generate_quiz_question(model: &str, topic: &str) -> Result<QuizQuestion, String> {
     if !check_ollama_running() {
         let _ = ensure_ollama_started()?;
     }
 
+    let role_md = load_role_markdown();
     let prompt = format!(
-        "Génère une question d'apprentissage ou de culture générale/technique sur le sujet : « {} ».\n\
+        "En tant que Sensei Kaze, génère une question d'apprentissage stimulante sur le sujet : « {} ».\n\
         Fournis exactement 4 options de réponse (A, B, C, D) courtes, claires et plausibles.\n\
         Indique l'index de la bonne réponse (0 pour A, 1 pour B, 2 pour C, 3 pour D).\n\
-        Fournis une explication enrichissante de 1 ou 2 phrases pour après la réponse.",
-        if topic.trim().is_empty() { "culture générale ou philosophie zen ou code" } else { topic.trim() }
+        Fournis une explication pédagogique de Sensei (1 ou 2 phrases claires et inspirantes).",
+        if topic.trim().is_empty() {
+            "Philosophie Zen, Bushidō ou Architecture Informatique"
+        } else {
+            topic.trim()
+        }
     );
 
     let schema = json!({
@@ -151,12 +251,15 @@ pub fn generate_quiz_question(model: &str, topic: &str) -> Result<QuizQuestion, 
         "think": false,
         "format": schema,
         "options": {
-            "temperature": 0.5
+            "temperature": 0.55
         },
         "messages": [
             {
                 "role": "system",
-                "content": "Tu es le Sensei du Dojo d'apprentissage de Kaze. Tu poses des questions captivantes en français avec 4 choix et une explication zen."
+                "content": format!(
+                    "Tu es le Sensei du Dojo d'Éveil de Kaze.\n{}\nTu poses des questions captivantes en français avec 4 choix concis et une explication lumineuse.",
+                    role_md
+                )
             },
             {
                 "role": "user",
@@ -178,7 +281,10 @@ pub fn generate_quiz_question(model: &str, topic: &str) -> Result<QuizQuestion, 
         .unwrap_or("{}");
 
     let parsed: QuizQuestion = serde_json::from_str(raw_content).map_err(|e| {
-        format!("Impossible de parser la question du Dojo : {} (brut: {})", e, raw_content)
+        format!(
+            "Impossible de parser la question du Dojo : {} (brut: {})",
+            e, raw_content
+        )
     })?;
 
     if parsed.options.len() != 4 || parsed.question.trim().is_empty() {
@@ -264,7 +370,7 @@ pub fn format_models_summary() -> Result<String, String> {
     let models = list_models()?;
     if models.is_empty() {
         return Ok(
-            "🟢 Ollama est actif, mais aucun modèle n'est installé.\n(Ex: `ollama pull qwen2.5:3b`)"
+            "Sanctuaire Ollama actif, mais aucun modèle n'est installé.\n(Ex: `ollama pull qwen2.5:3b`)"
                 .into(),
         );
     }
@@ -273,105 +379,31 @@ pub fn format_models_summary() -> Result<String, String> {
         .map(|(name, gb)| format!("• {} ({:.1} Go)", name, gb))
         .collect();
     Ok(format!(
-        "🟢 Sanctuaire Ollama actif !\nModèles présents ({}) :\n{}",
+        "Sanctuaire Ollama actif !\nModèles présents ({}) :\n{}",
         models.len(),
         lines.join("\n")
     ))
 }
 
-/// Étape 1 du Processus d'Agent :
-/// Le modèle analyse :
-/// 1) Que veut l'utilisateur ? (`user_intent`)
-/// 2) Que vais-je faire ? (`planned_action` + `task`)
-/// 3) S'il refuse, comment puis-je continuer ? (`fallback_if_refused`)
-/// Si `task.action != "none"`, retourne `AgentTurnOutcome::NeedsConfirmation` pour demander la permission.
-pub fn plan_pet_action(
-    model: &str,
-    history: &[ChatMessage],
-    user_input: &str,
-) -> Result<AgentTurnOutcome, String> {
-    if !check_ollama_running() {
-        let _ = ensure_ollama_started()?;
-    }
-
-    let deep_awareness = awareness::build_deep_awareness_context();
-    let system_prompt = format!(
-        "Tu es Kaze (風), un petit samouraï zen, loyal et prudent qui vit sur le bureau de l'utilisateur.\n\
-        Tu suis un PROCESSUS D'AGENT RIGOUREUX avant toute action :\n\
-        1. `user_intent` : Que veut l'utilisateur exactement ?\n\
-        2. `planned_action` : Que vais-je faire concrètement pour lui répondre ?\n\
-        3. `fallback_if_refused` : Si l'utilisateur refuse cette action, comment puis-je continuer à l'aider autrement (ex: explication théorique, autre piste) ?\n\
-        4. `reply` : Ta phrase chaleureuse demandant la permission d'agir (si `task.action != \"none\"`) ou ta réponse directe (si `task.action == \"none\"`).\n\n\
-        {}\n\n\
-        CAPACITÉS DISPONIBLES (`task.action` et `task.arg`) :\n\
-        - \"none\" : simple discussion ou réponse directe à partir des données DÉJÀ présentes dans ta conscience temps réel\n\
-        - \"timer_status\" : afficher le détail des minuteurs et Pomodoros actifs (arg: \"\")\n\
-        - \"set_timer\" : créer un nouveau minuteur (arg: \"<durée> <nom>\", ex \"45s Thé vert\" ou \"5m Pause\")\n\
-        - \"pomodoro\" : lancer une session Pomodoro Zen en minutes (arg: ex \"25\")\n\
-        - \"cancel_timer\" : annuler un minuteur ou Pomodoro (arg: \"all\" ou nom/numéro)\n\
-        - \"remember_fact\" : mémoriser durablement un fait sur l'utilisateur (arg: fait à retenir)\n\
-        - \"recall_memory\" : afficher toute la mémoire long-terme (arg: \"\")\n\
-        - \"forget_memory\" : oublier un souvenir (arg: mot-clé ou \"all\")\n\
-        - \"write_note\" : écrire une note sur le parchemin (arg: texte)\n\
-        - \"read_notes\" : lire toutes les notes du parchemin (arg: \"\")\n\
-        - \"clear_notes\" : effacer toutes les notes (arg: \"\")\n\
-        - \"system_info\" : bilan complet CPU, RAM, Disque, Audio, Uptime (arg: \"\")\n\
-        - \"top_processes\" : liste détaillée des applications utilisant le plus de mémoire (arg: \"\")\n\
-        - \"network_info\" : état réseau et IP (arg: \"\")\n\
-        - \"battery_info\" : niveau de batterie et alimentation (arg: \"\")\n\
-        - \"audio_control\" : régler ou couper le son (arg: \"+10\", \"-10\", \"50\", \"mute\", \"unmute\", \"status\")\n\
-        - \"media_control\" : contrôler la musique/vidéo (arg: \"play\", \"pause\", \"next\", \"prev\")\n\
-        - \"screenshot\" : prendre une capture d'écran (arg: \"\")\n\
-        - \"kde_action\" : action bureau (arg: \"lock\", \"krunner\", \"settings\", \"monitor\")\n\
-        - \"clipboard_read\" : lire le presse-papiers complet (arg: \"\")\n\
-        - \"clipboard_write\" : copier un texte dans le presse-papiers (arg: texte)\n\
-        - \"open_app\" : lancer une application (arg: ex \"dolphin\", \"konsole\", \"kate\", \"firefox\", \"kcalc\")\n\
-        - \"open_url\" : ouvrir un site ou une recherche web (arg: URL ou recherche)\n\
-        - \"list_files\" : lister les fichiers d'un dossier (arg: chemin ex \"~\", \"~/Documents\", \".\")\n\
-        - \"find_files\" : chercher un fichier par nom (arg: motif)\n\
-        - \"read_file\" : lire le contenu d'un fichier texte (arg: chemin)\n\
-        - \"run_shell\" : exécuter une commande shell (arg: commande)\n\
-        - \"notify\" : envoyer une notification système (arg: message)\n\n\
-        RÈGLES ESSENTIELLES :\n\
-        1. TOUTE action (`task.action` différent de \"none\"), même la commande la plus mondaine (lister un dossier, lire un fichier, ouvrir une appli, lancer un minuteur, voir le bilan système), demandera confirmation à l'utilisateur : formule donc `reply` comme une proposition polie expliquant ce que tu t'apprêtes à faire.\n\
-        2. Remplis toujours `user_intent`, `planned_action` et `fallback_if_refused` en français clair.\n\
-        3. Choisis `mood` parmi : \"idle\", \"run\", \"jump\", \"attack\", \"swim\", \"special\".",
-        deep_awareness
-    );
-
-    let mut messages = Vec::with_capacity(history.len() + 2);
-    messages.push(json!({
-        "role": "system",
-        "content": system_prompt
-    }));
-
-    let start_idx = history.len().saturating_sub(6);
-    for msg in &history[start_idx..] {
-        messages.push(json!({
-            "role": msg.role,
-            "content": msg.content
-        }));
-    }
-
-    messages.push(json!({
-        "role": "user",
-        "content": user_input
-    }));
-
-    let schema = json!({
+fn agent_json_schema() -> Value {
+    json!({
         "type": "object",
         "properties": {
             "user_intent": {
                 "type": "string",
-                "description": "Que veut l'utilisateur ? (Objectif compris)"
+                "description": "Intention ou besoin actuel du disciple"
             },
             "planned_action": {
                 "type": "string",
-                "description": "Que vais-je faire concrètement ? (Action technique prévue)"
+                "description": "Action concrète choisie par Sensei Kaze"
             },
             "fallback_if_refused": {
                 "type": "string",
-                "description": "Si l'utilisateur refuse cette action, comment continuer à l'aider sans exécuter la commande ?"
+                "description": "Alternative bienveillante si le disciple refuse l'action"
+            },
+            "auto_remember": {
+                "type": "string",
+                "description": "Fait nouveau et durable appris sur l'utilisateur à mémoriser automatiquement (ou chaîne vide \"\")"
             },
             "mood": {
                 "type": "string",
@@ -379,7 +411,7 @@ pub fn plan_pet_action(
             },
             "reply": {
                 "type": "string",
-                "description": "Message poli demandant à l'utilisateur s'il accepte l'action"
+                "description": "Parole de Sensei Kaze en français (2 à 4 phrases ciselées)"
             },
             "task": {
                 "type": "object",
@@ -422,16 +454,93 @@ pub fn plan_pet_action(
                 "required": ["action", "arg"]
             }
         },
-        "required": ["user_intent", "planned_action", "fallback_if_refused", "mood", "reply", "task"]
-    });
+        "required": ["user_intent", "planned_action", "fallback_if_refused", "auto_remember", "mood", "reply", "task"]
+    })
+}
+
+fn build_sensei_system_prompt(deep_awareness: &str) -> String {
+    let role_md = load_role_markdown();
+    format!(
+        "{}\n\n\
+        {}\n\n\
+        CAPACITÉS D'ACTION SYSTÈME (`task.action` et `task.arg`) :\n\
+        - \"none\" : discussion, enseignement ou réponse directe à partir de ta conscience temps réel\n\
+        - \"timer_status\" : afficher le détail des sabliers et Pomodoros actifs (arg: \"\")\n\
+        - \"set_timer\" : créer un nouveau sablier (arg: \"<durée> <nom>\", ex \"3m Thé vert\" ou \"5m Pause\")\n\
+        - \"pomodoro\" : lancer une session Pomodoro Zen en minutes (arg: ex \"25\")\n\
+        - \"cancel_timer\" : arrêter un minuteur ou Pomodoro (arg: \"all\" ou nom/numéro)\n\
+        - \"remember_fact\" : mémoriser durablement un fait sur le disciple (arg: fait à retenir)\n\
+        - \"recall_memory\" : consulter toute la mémoire long-terme (arg: \"\")\n\
+        - \"forget_memory\" : oublier un souvenir (arg: mot-clé ou \"all\")\n\
+        - \"write_note\" : graver une note sur le parchemin (arg: texte)\n\
+        - \"read_notes\" : lire les notes du parchemin (arg: \"\")\n\
+        - \"clear_notes\" : effacer toutes les notes (arg: \"\")\n\
+        - \"system_info\" : bilan complet CPU, RAM, Disque, Audio, Uptime (arg: \"\")\n\
+        - \"top_processes\" : inspecter les applications utilisant le plus de mémoire (arg: \"\")\n\
+        - \"network_info\" : état réseau et IP (arg: \"\")\n\
+        - \"battery_info\" : niveau de batterie et alimentation (arg: \"\")\n\
+        - \"audio_control\" : régler ou couper le son (arg: \"+10\", \"-10\", \"50\", \"mute\", \"unmute\", \"status\")\n\
+        - \"media_control\" : contrôler la musique/vidéo (arg: \"play\", \"pause\", \"next\", \"prev\")\n\
+        - \"screenshot\" : prendre une capture d'écran (arg: \"\")\n\
+        - \"kde_action\" : action bureau (arg: \"lock\", \"krunner\", \"settings\", \"monitor\")\n\
+        - \"clipboard_read\" : lire le presse-papiers complet (arg: \"\")\n\
+        - \"clipboard_write\" : copier un texte dans le presse-papiers (arg: texte)\n\
+        - \"open_app\" : lancer une application (arg: \"fichiers\", \"terminal\", \"editeur\", \"parametres\", \"moniteur\")\n\
+        - \"open_url\" : ouvrir un site ou une recherche web (arg: URL ou recherche)\n\
+        - \"list_files\" : lister les fichiers d'un dossier (arg: chemin ex \"~\", \"~/Documents\", \".\")\n\
+        - \"find_files\" : chercher un fichier par nom (arg: motif)\n\
+        - \"read_file\" : lire le contenu d'un fichier texte (arg: chemin)\n\
+        - \"run_shell\" : exécuter une commande shell ou PowerShell (arg: commande)\n\
+        - \"notify\" : envoyer une notification bureau (arg: message)\n\n\
+        RÈGLES DU SENSEI :\n\
+        1. Parle comme un véritable Sensei Samouraï Zen : calme, volontaire, structuré et bienveillant.\n\
+        2. Si l'utilisateur révèle un fait important sur lui (son projet, son langage préféré, son objectif), inscris-le dans `auto_remember` pour le retenir automatiquement.\n\
+        3. Choisis `mood` parmi : \"idle\", \"run\", \"jump\", \"attack\", \"swim\", \"special\".",
+        role_md, deep_awareness
+    )
+}
+
+/// Étape 1 du Processus d'Agent :
+/// Analyse la demande avec la charte `ROLE.md`, mémorise spontanément tout fait nouveau (`auto_remember`),
+/// et prépare la réponse ou l'action système.
+pub fn plan_pet_action(
+    model: &str,
+    history: &[ChatMessage],
+    user_input: &str,
+) -> Result<AgentTurnOutcome, String> {
+    if !check_ollama_running() {
+        let _ = ensure_ollama_started()?;
+    }
+
+    let deep_awareness = awareness::build_deep_awareness_context();
+    let system_prompt = build_sensei_system_prompt(&deep_awareness);
+
+    let mut messages = Vec::with_capacity(history.len() + 2);
+    messages.push(json!({
+        "role": "system",
+        "content": system_prompt
+    }));
+
+    let start_idx = history.len().saturating_sub(6);
+    for msg in &history[start_idx..] {
+        messages.push(json!({
+            "role": msg.role,
+            "content": msg.content
+        }));
+    }
+
+    messages.push(json!({
+        "role": "user",
+        "content": user_input
+    }));
 
     let payload = json!({
         "model": model,
         "stream": false,
         "think": false,
-        "format": schema,
+        "format": agent_json_schema(),
         "options": {
-            "temperature": 0.25
+            "temperature": 0.3
         },
         "messages": messages
     });
@@ -448,22 +557,86 @@ pub fn plan_pet_action(
         .and_then(|c| c.as_str())
         .unwrap_or("{}");
 
+    parse_agent_plan_outcome(raw_content, user_input)
+}
+
+/// Génère une prise de parole ou proposition d'action **volontaire et autonome** du Sensei
+/// à partir de l'état de progression du disciple et de la conscience temps réel du système.
+pub fn generate_sensei_initiative(
+    model: &str,
+    progress_summary: &str,
+) -> Result<AgentTurnOutcome, String> {
+    if !check_ollama_running() {
+        let _ = ensure_ollama_started()?;
+    }
+
+    let deep_awareness = awareness::build_deep_awareness_context();
+    let system_prompt = build_sensei_system_prompt(&deep_awareness);
+
+    let initiative_prompt = format!(
+        "[INITIATIVE AUTONOME DU SENSEI]\n\
+        Progression actuelle du disciple : {}\n\n\
+        En tant que Sensei Kaze, prends volontairement la parole de ta propre initiative !\n\
+        Observe l'état du système (RAM, CPU, minuteurs actifs), les souvenirs du disciple et son avancement sur les Trois Voies (Zazen, Éveil, Bushidō).\n\
+        - Si aucun minuteur n'est actif et qu'il travaille, tu peux lui proposer un Pomodoro (`action: \"pomodoro\"`, `arg: \"25\"`) ou un sablier court.\n\
+        - Si la mémoire RAM est très sollicitée (>80%), propose d'inspecter les processus (`action: \"top_processes\"`).\n\
+        - Sinon (`action: \"none\"`), offre-lui un conseil martial/technique précis, un Kōan court, ou invite-le à accomplir son prochain geste d'Harmonie du Jour au Dojo.",
+        progress_summary
+    );
+
+    let payload = json!({
+        "model": model,
+        "stream": false,
+        "think": false,
+        "format": agent_json_schema(),
+        "options": {
+            "temperature": 0.45
+        },
+        "messages": [
+            { "role": "system", "content": system_prompt },
+            { "role": "user", "content": initiative_prompt }
+        ]
+    });
+
+    let resp = ureq::post(&format!("{}/api/chat", OLLAMA_BASE))
+        .timeout(Duration::from_secs(35))
+        .send_json(payload)
+        .map_err(|e| format!("Erreur initiative Sensei ({}) : {}", model, e))?;
+
+    let body: Value = resp.into_json().map_err(|e| e.to_string())?;
+    let raw_content = body
+        .get("message")
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_str())
+        .unwrap_or("{}");
+
+    parse_agent_plan_outcome(raw_content, "Initiative volontaire du Sensei")
+}
+
+fn parse_agent_plan_outcome(raw_content: &str, user_input: &str) -> Result<AgentTurnOutcome, String> {
     let parsed: StructuredAgentPlan =
         serde_json::from_str(raw_content).unwrap_or_else(|_| StructuredAgentPlan {
-            user_intent: "Échanger avec Kaze".into(),
+            user_intent: "Échanger avec Sensei Kaze".into(),
             planned_action: "Répondre directement".into(),
             fallback_if_refused: "Continuer la discussion".into(),
+            auto_remember: String::new(),
             mood: "idle".into(),
             reply: raw_content.to_string(),
             task: PetTask::default(),
         });
+
+    // Apprentissage autonome : si le Sensei a détecté un fait durable sur le disciple, il le mémorise spontanément
+    let mem_fact = parsed.auto_remember.trim();
+    if !mem_fact.is_empty() && mem_fact.len() >= 4 && mem_fact != "none" && mem_fact != "aucun" {
+        let _ = awareness::remember_fact(mem_fact);
+    }
 
     let mood = PetMood::from_str(&parsed.mood);
     let action_clean = parsed.task.action.trim().to_lowercase();
 
     if action_clean.is_empty() || action_clean == "none" {
         let text = if parsed.reply.trim().is_empty() {
-            "Je suis à votre écoute avec sérénité.".to_string()
+            "Je veille sur ton étude avec sérénité, Disciple.".to_string()
         } else {
             parsed.reply.trim().to_string()
         };
@@ -473,7 +646,6 @@ pub fn plan_pet_action(
         });
     }
 
-    // Une action est envisagée : on exige systématiquement la confirmation de l'utilisateur !
     let human_desc = tasks::describe_task_human(&action_clean, &parsed.task.arg);
     let user_intent = if parsed.user_intent.trim().is_empty() {
         format!("Demande : « {} »", user_input)
@@ -486,16 +658,12 @@ pub fn plan_pet_action(
         format!("{} ({})", parsed.planned_action.trim(), human_desc)
     };
     let fallback = if parsed.fallback_if_refused.trim().is_empty() {
-        "Continuer la conversation sans exécuter l'action et proposer une explication ou alternative."
-            .to_string()
+        "Poursuivre l'échange au Dojo et proposer une approche alternative.".to_string()
     } else {
         parsed.fallback_if_refused.trim().to_string()
     };
     let proposal_reply = if parsed.reply.trim().is_empty() {
-        format!(
-            "Souhaitez-vous que j'exécute : {} ?",
-            human_desc
-        )
+        format!("Souhaites-tu que j'accomplisse : {} ?", human_desc)
     } else {
         parsed.reply.trim().to_string()
     };
@@ -514,17 +682,17 @@ pub fn plan_pet_action(
     }))
 }
 
-/// Étape 2A : L'utilisateur a ACCEPTÉ l'action proposée par l'agent.
-/// Exécute la tâche puis synthétise le résultat réel.
+/// Étape 2A : L'utilisateur (ou les autorisations automatiques) a validé l'action.
+/// Exécute la tâche puis synthétise le résultat réel avec le regard du Sensei.
 pub fn execute_confirmed_action(
     model: &str,
     pending: &PendingAgentAction,
 ) -> Result<AgentFinalResult, String> {
-    let task_output = tasks::execute_task(&pending.task)
-        .unwrap_or_else(|| "(Action effectuée)".to_string());
+    let task_output =
+        tasks::execute_task(&pending.task).unwrap_or_else(|| "(Action accomplie)".to_string());
 
     let deep_awareness = awareness::build_deep_awareness_context();
-    let mut commentary = "✅ Action confirmée et accomplie avec soin.".to_string();
+    let mut commentary = "Action accomplie avec maîtrise.".to_string();
 
     if pending.task.needs_synthesis() {
         if let Ok(synth) =
@@ -535,7 +703,7 @@ pub fn execute_confirmed_action(
             }
         }
     } else {
-        commentary = format!("✅ Accord reçu ! {}", pending.proposal_reply);
+        commentary = pending.proposal_reply.clone();
     }
 
     let mood = match pending.task.action.as_str() {
@@ -551,17 +719,16 @@ pub fn execute_confirmed_action(
 }
 
 /// Étape 2B : L'utilisateur a REFUSÉ l'action proposée par l'agent.
-/// L'agent n'exécute PAS l'action et rebondit avec bienveillance en suivant son Plan B (`fallback_if_refused`).
 pub fn handle_rejected_action(
     model: &str,
     pending: &PendingAgentAction,
 ) -> Result<AgentFinalResult, String> {
     let prompt = format!(
-        "Demande initiale de l'utilisateur : « {} »\n\
-        Action que tu avais proposée : {} (`{}` `{}`)\n\
-        Décision de l'utilisateur : REFUSÉ (l'utilisateur ne souhaite pas que cette action soit exécutée).\n\
-        Ton plan B prévu : « {} »\n\n\
-        En tant que Kaze (petit samouraï zen), prends acte avec respect et sérénité du refus de l'utilisateur (confirme qu'aucune action n'a été lancée) et applique ton plan B ou propose-lui de continuer autrement en 1 ou 2 phrases courtes en français.",
+        "Demande initiale : « {} »\n\
+        Action proposée : {} (`{}` `{}`)\n\
+        Décision du disciple : REFUSÉ.\n\
+        Plan alternatif prévu : « {} »\n\n\
+        En tant que Sensei Kaze, prends acte avec noblesse et sérénité du refus (confirme qu'aucune action n'a été lancée) et applique ton plan alternatif en 1 ou 2 phrases courtes en français.",
         pending.user_input,
         pending.planned_action,
         pending.task.action,
@@ -596,10 +763,7 @@ pub fn handle_rejected_action(
                 if !trimmed.is_empty() {
                     return Ok(AgentFinalResult {
                         mood: PetMood::Idle,
-                        display_text: format!(
-                            "🛑 Action annulée à votre demande.\n\n💬 Kaze : {}",
-                            trimmed
-                        ),
+                        display_text: format!("Action retenue.\n\nSensei Kaze : {}", trimmed),
                     });
                 }
             }
@@ -609,7 +773,7 @@ pub fn handle_rejected_action(
     Ok(AgentFinalResult {
         mood: PetMood::Idle,
         display_text: format!(
-            "🛑 Action annulée à votre demande (aucune commande exécutée).\n\n🍃 Plan alternatif : {}",
+            "Action retenue (aucune commande exécutée).\n\nVoie alternative : {}",
             pending.fallback_if_refused
         ),
     })
@@ -622,8 +786,8 @@ fn synthesize_tool_output(
     tool_output: &str,
 ) -> Result<String, String> {
     let prompt = format!(
-        "{}\n\nDemande de l'utilisateur : « {} »\nRésultat de l'outil exécuté (après accord de l'utilisateur) :\n{}\n\n\
-        Tu es Kaze (le petit samouraï zen ; l'utilisateur est ton compagnon décrit dans [MÉMOIRE LONG-TERME UTILISATEUR]). Réponds en 1 ou 2 phrases courtes et utiles en français à partir de ta conscience et de ce résultat réel.",
+        "{}\n\nDemande du disciple : « {} »\nRésultat de l'outil exécuté :\n{}\n\n\
+        Tu es Sensei Kaze. Analyse ce résultat et réponds en 1 ou 2 phrases claires, utiles et volontaires en français, en proposant si pertinent la prochaine étape logique.",
         deep_awareness, user_input, tool_output
     );
 
@@ -633,7 +797,7 @@ fn synthesize_tool_output(
         "think": false,
         "options": {
             "temperature": 0.25,
-            "num_predict": 120
+            "num_predict": 140
         },
         "messages": [
             {"role": "user", "content": prompt}
