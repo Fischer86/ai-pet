@@ -1,42 +1,13 @@
-# dependencies (bun install)
-node_modules
-.bun/
+# Rust / Cargo build artifacts
+/target
 
-# lockfiles (à décommenter seulement si tu ne veux PAS versionner les dépendances exactes)
-# bun.lock
-# bun.lockb
+# Captures d'écran locales éventuelles
+/captures
 
-# output
-out
-dist
-*.tgz
-
-# code coverage
-coverage
-*.lcov
-
-# logs
-logs
-*.log
-report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
-
-# dotenv environment variable files
-.env
-.env.development.local
-.env.test.local
-.env.production.local
-.env.local
-
-# caches
-.eslintcache
-.cache
-*.tsbuildinfo
-
-# IDEs & OS
-.idea
-.vscode/*
-!.vscode/settings.json
-!.vscode/tasks.json
-!.vscode/launch.json
+# OS & IDE files
 .DS_Store
 Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.log
